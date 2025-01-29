@@ -1,0 +1,16 @@
+{
+  "name": "synth",
+  "version": "0.0.1",
+  "description": "",
+  "main": "synth.js",
+  "scripts": {
+    "build": "tsc",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "Christian Wirén",
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^5.7.3"
+  }
+}
