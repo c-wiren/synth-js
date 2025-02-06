@@ -15,6 +15,8 @@ interface Oscillator {
     voices: Voice[];
     gain: GainNode;
     filter: BiquadFilterNode;
+    filter_cutoff: GainNode;
+    filter_envelope: GainNode;
 }
 
 interface OscillatorSettings {
@@ -22,6 +24,13 @@ interface OscillatorSettings {
     unison: number; // number of voices
     detune: number; // cents
     semitones: number; // transpose
+}
+
+function createConstantSource(audioCtx: AudioContext, value: number) {
+    const constantSource = audioCtx.createConstantSource();
+    constantSource.offset.value = value;
+    constantSource.start();
+    return constantSource;
 }
 
 class Synth {
@@ -34,9 +43,9 @@ class Synth {
     };
     oscillatorSettings: OscillatorSettings[];
     filterSettings: {
-        cutoff: number; // Hz
-        resonance: number; // Q
-        envelope: number; // Hz
+        cutoff: ConstantSourceNode; // Hz
+        resonance: ConstantSourceNode; // Q
+        envelope: ConstantSourceNode; // Hz
     };
 
     constructor(audioCtx: AudioContext, numOscillators: number = 2) {
@@ -52,9 +61,9 @@ class Synth {
             this.oscillatorSettings.push({ on: i === 0, unison: 1, detune: 0, semitones: 0 });
         }
         this.filterSettings = {
-            cutoff: 20000,
-            resonance: 0.5,
-            envelope: 0
+            cutoff: createConstantSource(audioCtx, 20000),
+            resonance: createConstantSource(audioCtx, 0.5),
+            envelope: createConstantSource(audioCtx, 0)
         };
     }
 
@@ -98,16 +107,24 @@ class Synth {
                 voices.push({ oscillator, panner });
             }
         }
+        const filter_cutoff = this.audioCtx.createGain();
+        filter_cutoff.gain.setValueAtTime(1, this.audioCtx.currentTime);
         const filter = this.audioCtx.createBiquadFilter();
         filter.type = "lowpass";
-        filter.frequency.setValueAtTime(this.filterSettings.cutoff, this.audioCtx.currentTime);
-        filter.Q.setValueAtTime(this.filterSettings.resonance, this.audioCtx.currentTime);
-        filter.frequency.exponentialRampToValueAtTime(this.filterSettings.cutoff + this.filterSettings.envelope, this.audioCtx.currentTime + this.envelopes.filter.attack);
-        filter.frequency.exponentialRampToValueAtTime(this.filterSettings.cutoff + this.filterSettings.envelope * this.envelopes.filter.sustain, this.audioCtx.currentTime + this.envelopes.filter.attack + this.envelopes.filter.decay);
+        this.filterSettings.cutoff.connect(filter_cutoff);
+        this.filterSettings.resonance.connect(filter.Q);
+        const filter_envelope = this.audioCtx.createGain();
+        filter_envelope.gain.setValueAtTime(0, this.audioCtx.currentTime);
+        // TODO: Why does this sound correct with linear?
+        filter_envelope.gain.linearRampToValueAtTime(1, this.audioCtx.currentTime + this.envelopes.filter.attack);
+        filter_envelope.gain.linearRampToValueAtTime(this.envelopes.filter.sustain, this.audioCtx.currentTime + this.envelopes.filter.attack + this.envelopes.filter.decay);
+        this.filterSettings.envelope.connect(filter_envelope);
+        filter_envelope.connect(filter_cutoff);
+        filter_cutoff.connect(filter.frequency);
         gain.connect(filter);
         filter.connect(this.audioCtx.destination);
 
-        this.oscillators.set(noteNumber, { noteNumber, voices, gain, filter });
+        this.oscillators.set(noteNumber, { noteNumber, voices, gain, filter, filter_cutoff, filter_envelope });
     }
 
     noteOff(noteNumber: number) {
@@ -115,7 +132,7 @@ class Synth {
         if (oscillator) {
             oscillator.gain.gain.exponentialRampToValueAtTime(1e-6, this.audioCtx.currentTime + this.envelopes.amplitude.release);
             oscillator.gain.gain.setValueAtTime(0, this.audioCtx.currentTime + this.envelopes.amplitude.release);
-            oscillator.filter.frequency.exponentialRampToValueAtTime(this.filterSettings.cutoff, this.audioCtx.currentTime + this.envelopes.filter.release);
+            oscillator.filter_envelope.gain.exponentialRampToValueAtTime(0, this.audioCtx.currentTime + this.envelopes.filter.release);
             for (let voice of oscillator.voices) {
                 voice.oscillator.stop(this.audioCtx.currentTime + this.envelopes.amplitude.release);
             }
@@ -127,6 +144,8 @@ class Synth {
                     }
                     oscillator.gain.disconnect();
                     oscillator.filter.disconnect();
+                    oscillator.filter_cutoff.disconnect();
+                    oscillator.filter_envelope.disconnect();
                     this.oscillators.delete(noteNumber);
                 };
             }
