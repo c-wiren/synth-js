@@ -1,4 +1,4 @@
-interface ADSR {
+export interface ADSR {
     attack: number; // seconds
     decay: number; // seconds
     sustain: number; // 0 to 1
@@ -15,7 +15,7 @@ interface Oscillator {
     frequency: GainNode;
 }
 
-enum Waveform {
+export enum Waveform {
     Sawtooth = 0,
     Square = 1
 }
@@ -40,6 +40,26 @@ interface OscillatorSettings {
     waveform: Waveform;
 }
 
+export interface Preset {
+    envelopes: {
+        amplitude: ADSR;
+        filter: ADSR;
+    },
+    oscillators: {
+        on: boolean;
+        semitones: number;
+        fine: number;
+        unison: number;
+        detune: number;
+        waveform: Waveform;
+    }[];
+    filter: {
+        cutoff: number;
+        resonance: number;
+        envelope: number;
+    };
+}
+
 function createConstantSource(audioCtx: AudioContext, value: number) {
     const constantSource = audioCtx.createConstantSource();
     constantSource.offset.value = value;
@@ -51,7 +71,7 @@ function defaultOscillatorSettings(audioCtx: AudioContext, on: boolean): Oscilla
     return { on, semitones: 0, fine: 0, unison: 1, detune: 0, pitch: createConstantSource(audioCtx, 1), waveform: Waveform.Sawtooth };
 }
 
-class Synth {
+export class Synth {
     audioCtx: AudioContext;
     notes: Map<number, Note>;
     tuning: number;
@@ -71,7 +91,7 @@ class Synth {
         this.notes = new Map();
         this.tuning = 440;
         this.envelopes = {
-            amplitude: { attack: 0.01, decay: 1.0, sustain: 1.0, release: 1.0 },
+            amplitude: { attack: 0.0, decay: 1.0, sustain: 1.0, release: 1.0 },
             filter: { attack: 0.0, decay: 1.0, sustain: 1.0, release: 1.0 }
         };
         this.oscillatorSettings = [];
@@ -82,6 +102,58 @@ class Synth {
             resonance: createConstantSource(audioCtx, 0.5),
             envelope: createConstantSource(audioCtx, 0)
         };
+    }
+
+    applyPreset(preset: Partial<Preset>) {
+        if (preset.envelopes) {
+            if (preset.envelopes.amplitude) {
+                Object.assign(this.envelopes.amplitude, preset.envelopes.amplitude);
+            }
+            if (preset.envelopes.filter) {
+                Object.assign(this.envelopes.filter, preset.envelopes.filter);
+            }
+        }
+        if (preset.oscillators) {
+            for (let i = 0; i < preset.oscillators.length; i++) {
+                if (preset.oscillators[i]) {
+                    let updatePitch = false;
+                    if (preset.oscillators[i].on !== undefined) {
+                        this.oscillatorSettings[i].on = preset.oscillators[i].on;
+                    }
+                    if (preset.oscillators[i].semitones !== undefined) {
+                        this.oscillatorSettings[i].semitones = preset.oscillators[i].semitones;
+                        updatePitch = true;
+                    }
+                    if (preset.oscillators[i].fine !== undefined) {
+                        this.oscillatorSettings[i].fine = preset.oscillators[i].fine;
+                        updatePitch = true;
+                    }
+                    if (updatePitch) {
+                        this.oscillatorSettings[i].pitch.offset.setValueAtTime(this.semitonesToMultiplier(this.oscillatorSettings[i].semitones + this.oscillatorSettings[i].fine / 100), this.audioCtx.currentTime);
+                    }
+                    if (preset.oscillators[i].unison !== undefined) {
+                        this.oscillatorSettings[i].unison = preset.oscillators[i].unison;
+                    }
+                    if (preset.oscillators[i].detune !== undefined) {
+                        this.oscillatorSettings[i].detune = preset.oscillators[i].detune;
+                    }
+                    if (preset.oscillators[i].waveform !== undefined) {
+                        this.oscillatorSettings[i].waveform = preset.oscillators[i].waveform;
+                    }
+                }
+            }
+        }
+        if (preset.filter) {
+            if (preset.filter.cutoff !== undefined) {
+                this.filterSettings.cutoff.offset.setValueAtTime(preset.filter.cutoff, this.audioCtx.currentTime);
+            }
+            if (preset.filter.resonance !== undefined) {
+                this.filterSettings.resonance.offset.setValueAtTime(preset.filter.resonance, this.audioCtx.currentTime);
+            }
+            if (preset.filter.envelope !== undefined) {
+                this.filterSettings.envelope.offset.setValueAtTime(preset.filter.envelope, this.audioCtx.currentTime);
+            }
+        }
     }
 
     createPeriodicWave(audioCtx: AudioContext, waveform: Waveform, phase: number = 0) {
@@ -124,8 +196,9 @@ class Synth {
             this.noteOff(noteNumber);
             return;
         }
+        // TODO: This should instead reuse the oscillators
         const gain = this.audioCtx.createGain();
-        gain.gain.setValueAtTime(0, this.audioCtx.currentTime);
+        gain.gain.setValueAtTime(1e-5, this.audioCtx.currentTime);
         gain.gain.exponentialRampToValueAtTime(velocity, this.audioCtx.currentTime + this.envelopes.amplitude.attack);
         gain.gain.exponentialRampToValueAtTime(velocity * this.envelopes.amplitude.sustain, this.audioCtx.currentTime + this.envelopes.amplitude.attack + this.envelopes.amplitude.decay);
         const frequency = createConstantSource(this.audioCtx, this.noteNumberToFrequency(noteNumber));
@@ -169,14 +242,21 @@ class Synth {
         gain.connect(filter);
         filter.connect(this.audioCtx.destination);
 
+        this.noteAbort(noteNumber);
         this.notes.set(noteNumber, { noteNumber, gain, filter, filter_cutoff, filter_envelope, frequency, oscillators });
     }
 
     noteOff(noteNumber: number) {
         const note = this.notes.get(noteNumber);
         if (note) {
-            note.gain.gain.exponentialRampToValueAtTime(1e-6, this.audioCtx.currentTime + this.envelopes.amplitude.release);
+            const currentGain = note.gain.gain.value;
+            note.gain.gain.cancelScheduledValues(this.audioCtx.currentTime);
+            note.gain.gain.setValueAtTime(currentGain, this.audioCtx.currentTime);
+            note.gain.gain.exponentialRampToValueAtTime(1e-5, this.audioCtx.currentTime + this.envelopes.amplitude.release);
             note.gain.gain.setValueAtTime(0, this.audioCtx.currentTime + this.envelopes.amplitude.release);
+            const currentEnvelope = note.filter_envelope.gain.value;
+            note.filter_envelope.gain.cancelScheduledValues(this.audioCtx.currentTime);
+            note.filter_envelope.gain.setValueAtTime(currentEnvelope, this.audioCtx.currentTime);
             note.filter_envelope.gain.linearRampToValueAtTime(0, this.audioCtx.currentTime + this.envelopes.filter.release);
             for (let oscillator of note.oscillators) {
                 for (let voice of oscillator.voices) {
@@ -184,20 +264,31 @@ class Synth {
                 }
                 if (oscillator.voices.length > 0) {
                     oscillator.voices[0].oscillator.onended = () => {
-                        for (let voice of oscillator.voices) {
-                            voice.oscillator.disconnect();
-                            voice.panner.disconnect();
-                        }
-                        note.gain.disconnect();
-                        note.filter.disconnect();
-                        note.filter_cutoff.disconnect();
-                        note.filter_envelope.disconnect();
-                        for (let oscillator of note.oscillators) {
-                            oscillator.frequency.disconnect();
-                        }
-                        note.frequency.disconnect();
-                        this.notes.delete(noteNumber);
+                        this.noteAbort(noteNumber);
                     };
+                }
+            }
+        }
+    }
+
+    noteAbort(noteNumber: number) {
+        const note = this.notes.get(noteNumber);
+        if (note) {
+            for (let oscillator of note.oscillators) {
+                if (oscillator.voices.length > 0) {
+                    for (let voice of oscillator.voices) {
+                        voice.oscillator.disconnect();
+                        voice.panner.disconnect();
+                    }
+                    note.gain.disconnect();
+                    note.filter.disconnect();
+                    note.filter_cutoff.disconnect();
+                    note.filter_envelope.disconnect();
+                    for (let oscillator of note.oscillators) {
+                        oscillator.frequency.disconnect();
+                    }
+                    note.frequency.disconnect();
+                    this.notes.delete(noteNumber);
                 }
             }
         }
