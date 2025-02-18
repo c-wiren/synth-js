@@ -2,7 +2,10 @@
   "name": "synth",
   "version": "0.0.1",
   "description": "",
-  "main": "synth.js",
+  "main": "dist/synth.js",
+  "module": "dist/synth.esm.js",
+  "types": "dist/synth.d.ts",
+  "files": ["dist"],
   "scripts": {
     "build": "tsc",
     "test": "echo \"Error: no test specified\" && exit 1"
