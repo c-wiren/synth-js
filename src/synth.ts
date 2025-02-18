@@ -64,7 +64,7 @@ export interface Preset {
     };
 }
 
-function createConstantSource(audioCtx: AudioContext, value: number) {
+function createConstantSource(audioCtx: AudioContext, value: number): ConstantSourceNode {
     const constantSource = audioCtx.createConstantSource();
     constantSource.offset.value = value;
     constantSource.start();
@@ -160,7 +160,29 @@ export class Synth {
         }
     }
 
-    createPeriodicWave(audioCtx: AudioContext, waveform: Waveform, phase: number = 0) {
+    exportPreset(): Preset {
+        return {
+            envelopes: {
+                amplitude: { ...this.envelopes.amplitude },
+                filter: { ...this.envelopes.filter }
+            },
+            oscillators: this.oscillatorSettings.map(settings => ({
+                on: settings.on,
+                semitones: settings.semitones,
+                fine: settings.fine,
+                unison: settings.unison,
+                detune: settings.detune,
+                waveform: settings.waveform
+            })),
+            filter: {
+                cutoff: this.filterSettings.cutoff.offset.value,
+                resonance: this.filterSettings.resonance.offset.value,
+                envelope: this.filterSettings.envelope.offset.value
+            }
+        };
+    }
+
+    createPeriodicWave(audioCtx: AudioContext, waveform: Waveform, phase: number = 0): PeriodicWave {
         const size = 256;
         const real = new Float32Array(size);
         const imag = new Float32Array(size);
@@ -187,11 +209,11 @@ export class Synth {
         return audioCtx.createPeriodicWave(real, imag);
     }
 
-    semitonesToMultiplier(semitones: number) {
+    semitonesToMultiplier(semitones: number): number {
         return Math.pow(2, semitones / 12);
     }
 
-    noteNumberToFrequency(noteNumber: number) {
+    noteNumberToFrequency(noteNumber: number): number {
         return this.tuning * Math.pow(2, (noteNumber - 69) / 12);
     }
 
