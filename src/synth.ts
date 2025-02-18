@@ -1,3 +1,7 @@
+type DeepPartial<T> = T extends object ? {
+    [P in keyof T]?: DeepPartial<T[P]>;
+} : T;
+
 export interface ADSR {
     attack: number; // seconds
     decay: number; // seconds
@@ -104,7 +108,7 @@ export class Synth {
         };
     }
 
-    applyPreset(preset: Partial<Preset>) {
+    applyPreset(preset: DeepPartial<Preset>) {
         if (preset.envelopes) {
             if (preset.envelopes.amplitude) {
                 Object.assign(this.envelopes.amplitude, preset.envelopes.amplitude);
@@ -117,28 +121,28 @@ export class Synth {
             for (let i = 0; i < preset.oscillators.length; i++) {
                 if (preset.oscillators[i]) {
                     let updatePitch = false;
-                    if (preset.oscillators[i].on !== undefined) {
-                        this.oscillatorSettings[i].on = preset.oscillators[i].on;
+                    if (preset.oscillators[i]!.on !== undefined) {
+                        this.oscillatorSettings[i].on = preset.oscillators[i]!.on!;
                     }
-                    if (preset.oscillators[i].semitones !== undefined) {
-                        this.oscillatorSettings[i].semitones = preset.oscillators[i].semitones;
+                    if (preset.oscillators[i]!.semitones !== undefined) {
+                        this.oscillatorSettings[i].semitones = preset.oscillators[i]!.semitones!;
                         updatePitch = true;
                     }
-                    if (preset.oscillators[i].fine !== undefined) {
-                        this.oscillatorSettings[i].fine = preset.oscillators[i].fine;
+                    if (preset.oscillators[i]!.fine !== undefined) {
+                        this.oscillatorSettings[i].fine = preset.oscillators[i]!.fine!;
                         updatePitch = true;
                     }
                     if (updatePitch) {
                         this.oscillatorSettings[i].pitch.offset.setValueAtTime(this.semitonesToMultiplier(this.oscillatorSettings[i].semitones + this.oscillatorSettings[i].fine / 100), this.audioCtx.currentTime);
                     }
-                    if (preset.oscillators[i].unison !== undefined) {
-                        this.oscillatorSettings[i].unison = preset.oscillators[i].unison;
+                    if (preset.oscillators[i]!.unison !== undefined) {
+                        this.oscillatorSettings[i].unison = preset.oscillators[i]!.unison!;
                     }
-                    if (preset.oscillators[i].detune !== undefined) {
-                        this.oscillatorSettings[i].detune = preset.oscillators[i].detune;
+                    if (preset.oscillators[i]!.detune !== undefined) {
+                        this.oscillatorSettings[i].detune = preset.oscillators[i]!.detune!;
                     }
-                    if (preset.oscillators[i].waveform !== undefined) {
-                        this.oscillatorSettings[i].waveform = preset.oscillators[i].waveform;
+                    if (preset.oscillators[i]!.waveform !== undefined) {
+                        this.oscillatorSettings[i].waveform = preset.oscillators[i]!.waveform!;
                     }
                 }
             }

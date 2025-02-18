@@ -3,7 +3,6 @@
   "version": "0.0.1",
   "description": "",
   "main": "dist/synth.js",
-  "module": "dist/synth.esm.js",
   "types": "dist/synth.d.ts",
   "files": ["dist"],
   "scripts": {
