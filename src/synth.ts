@@ -17,6 +17,7 @@ interface Voice {
 interface Oscillator {
     voices: Voice[];
     frequency: GainNode;
+    gain: GainNode;
 }
 
 export enum Waveform {
@@ -64,6 +65,24 @@ export interface Preset {
     };
 }
 
+function dBToGain(value: number): number {
+    return Math.pow(10, value / 20);
+}
+
+function calculateDetune(unison: number, voice: number) {
+    // Asymmetric detune
+    const left_gain = 0.9;
+    const left_power = 1.22;
+    const right_power = 1.2;
+    let voice_detune = unison > 1 ? ((voice / unison * 2 - 1)) : 0;
+    return voice_detune > 0 ? Math.pow(voice_detune, left_power) * left_gain : -Math.pow(-voice_detune, right_power);
+}
+
+function calculateUnisonGain(unison: number) {
+    const strength = 0.7;
+    return 1 - strength + strength / Math.sqrt(Math.max(unison - 1, 1));
+}
+
 function createConstantSource(audioCtx: AudioContext, value: number): ConstantSourceNode {
     const constantSource = audioCtx.createConstantSource();
     constantSource.offset.value = value;
@@ -89,6 +108,8 @@ export class Synth {
         resonance: ConstantSourceNode; // Q
         envelope: ConstantSourceNode; // Hz
     };
+    masterVolume: number; // dB
+    masterGain: GainNode;
 
     constructor(audioCtx: AudioContext) {
         this.audioCtx = audioCtx;
@@ -106,6 +127,10 @@ export class Synth {
             resonance: createConstantSource(audioCtx, 0.5),
             envelope: createConstantSource(audioCtx, 0)
         };
+        this.masterVolume = -12; // dB
+        this.masterGain = audioCtx.createGain();
+        this.masterGain.gain.setValueAtTime(dBToGain(this.masterVolume), audioCtx.currentTime);
+        this.masterGain.connect(audioCtx.destination);
     }
 
     applyPreset(preset: DeepPartial<Preset>) {
@@ -232,6 +257,9 @@ export class Synth {
         for (let settings of this.oscillatorSettings) {
             if (!settings.on) { continue; }
             const voices = [];
+            const oscillator_gain = this.audioCtx.createGain();
+            oscillator_gain.gain.setValueAtTime(calculateUnisonGain(settings.unison), this.audioCtx.currentTime);
+            oscillator_gain.connect(gain);
             const oscillator_frequency = this.audioCtx.createGain();
             oscillator_frequency.gain.setValueAtTime(0, this.audioCtx.currentTime);
             settings.pitch.connect(oscillator_frequency.gain);
@@ -243,13 +271,13 @@ export class Synth {
                 oscillator.setPeriodicWave(this.createPeriodicWave(this.audioCtx, settings.waveform, Math.random()));
                 oscillator.frequency.setValueAtTime(0, this.audioCtx.currentTime);
                 oscillator_frequency.connect(oscillator.frequency);
-                oscillator.detune.setValueAtTime(settings.unison > 1 ? ((i / settings.unison * 2 - 1) * settings.detune) : 0, this.audioCtx.currentTime);
+                oscillator.detune.setValueAtTime(calculateDetune(settings.unison, i) * settings.detune, this.audioCtx.currentTime);
                 oscillator.connect(panner);
-                panner.connect(gain);
+                panner.connect(oscillator_gain);
                 oscillator.start();
                 voices.push({ oscillator, panner });
             }
-            oscillators.push({ voices, frequency: oscillator_frequency });
+            oscillators.push({ voices, frequency: oscillator_frequency, gain: oscillator_gain });
         }
         const filter_cutoff = this.audioCtx.createGain();
         filter_cutoff.gain.setValueAtTime(1, this.audioCtx.currentTime);
@@ -266,7 +294,7 @@ export class Synth {
         filter_envelope.connect(filter_cutoff);
         filter_cutoff.connect(filter.frequency);
         gain.connect(filter);
-        filter.connect(this.audioCtx.destination);
+        filter.connect(this.masterGain);
 
         this.noteAbort(noteNumber);
         this.notes.set(noteNumber, { noteNumber, gain, filter, filter_cutoff, filter_envelope, frequency, oscillators });
@@ -284,14 +312,15 @@ export class Synth {
             note.filter_envelope.gain.cancelScheduledValues(this.audioCtx.currentTime);
             note.filter_envelope.gain.setValueAtTime(currentEnvelope, this.audioCtx.currentTime);
             note.filter_envelope.gain.linearRampToValueAtTime(0, this.audioCtx.currentTime + this.envelopes.filter.release);
+            if (note.oscillators.length > 0 && note.oscillators[0].voices.length > 0) {
+                // Cleanup when the first oscillator ends
+                note.oscillators[0].voices[0].oscillator.onended = () => {
+                    this.noteAbort(noteNumber);
+                };
+            }
             for (let oscillator of note.oscillators) {
                 for (let voice of oscillator.voices) {
                     voice.oscillator.stop(this.audioCtx.currentTime + this.envelopes.amplitude.release);
-                }
-                if (oscillator.voices.length > 0) {
-                    oscillator.voices[0].oscillator.onended = () => {
-                        this.noteAbort(noteNumber);
-                    };
                 }
             }
         }
@@ -300,6 +329,10 @@ export class Synth {
     noteAbort(noteNumber: number) {
         const note = this.notes.get(noteNumber);
         if (note) {
+            if (note.oscillators.length > 0 && note.oscillators[0].voices.length > 0) {
+                // Reset in case of multiple calls
+                note.oscillators[0].voices[0].oscillator.onended = null;
+            }
             for (let oscillator of note.oscillators) {
                 if (oscillator.voices.length > 0) {
                     for (let voice of oscillator.voices) {
@@ -312,6 +345,7 @@ export class Synth {
                     note.filter_envelope.disconnect();
                     for (let oscillator of note.oscillators) {
                         oscillator.frequency.disconnect();
+                        oscillator.gain.disconnect();
                     }
                     note.frequency.disconnect();
                     this.notes.delete(noteNumber);
