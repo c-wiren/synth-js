@@ -69,7 +69,7 @@ function dBToGain(value: number): number {
     return Math.pow(10, value / 20);
 }
 
-function calculateDetune(unison: number, voice: number) {
+function calculateDetune(unison: number, voice: number): number {
     // Asymmetric detune
     const left_gain = 0.9;
     const left_power = 1.22;
@@ -78,9 +78,29 @@ function calculateDetune(unison: number, voice: number) {
     return voice_detune > 0 ? Math.pow(voice_detune, left_power) * left_gain : -Math.pow(-voice_detune, right_power);
 }
 
-function calculateUnisonGain(unison: number) {
+function calculateUnisonGain(unison: number): number {
     const strength = 0.7;
     return 1 - strength + strength / Math.sqrt(Math.max(unison - 1, 1));
+}
+
+/** Calculate the envelope curve at a given time
+ *
+ * @param time Time, normalized to 0-1
+ * @param shape Curve shape, 0 is linear, positive is exponential, negative is logarithmic
+ * @returns Value at time x, normalized to 0-1
+ */
+function calculateEnvelopeCurve(time: number, shape: number): number {
+    if (Math.abs(shape) < 1e-6) return time;
+    return (Math.exp(shape * time) - 1) / (Math.exp(shape) - 1);
+}
+
+function calculateEnvelopeCurveArray(start: number, end: number, shape: number): Float32Array {
+    const length = 9;
+    const curve = new Float32Array(length);
+    for (let i = 0; i < length; i++) {
+        curve[i] = start + calculateEnvelopeCurve(i / (length - 1), shape) * (end - start);
+    }
+    return curve;
 }
 
 function createConstantSource(audioCtx: AudioContext, value: number): ConstantSourceNode {
@@ -98,10 +118,15 @@ export class Synth {
     audioCtx: AudioContext;
     notes: Map<number, Note>;
     tuning: number;
+
     envelopes: {
         amplitude: ADSR,
         filter: ADSR;
     };
+    attackShape = 0;
+    decayShape = -2;
+    releaseShape = -5;
+
     oscillatorSettings: OscillatorSettings[];
     filterSettings: {
         cutoff: ConstantSourceNode; // Hz
@@ -116,8 +141,8 @@ export class Synth {
         this.notes = new Map();
         this.tuning = 440;
         this.envelopes = {
-            amplitude: { attack: 0.0, decay: 1.0, sustain: 1.0, release: 1.0 },
-            filter: { attack: 0.0, decay: 1.0, sustain: 1.0, release: 1.0 }
+            amplitude: { attack: 0.001, decay: 5.0, sustain: 1.0, release: 0.2 },
+            filter: { attack: 0.0, decay: 5.0, sustain: 1.0, release: 1.0 }
         };
         this.oscillatorSettings = [];
         this.oscillatorSettings.push(defaultOscillatorSettings(audioCtx, true));
@@ -249,9 +274,17 @@ export class Synth {
         }
         // TODO: This should instead reuse the oscillators
         const gain = this.audioCtx.createGain();
-        gain.gain.setValueAtTime(1e-5, this.audioCtx.currentTime);
-        gain.gain.exponentialRampToValueAtTime(velocity, this.audioCtx.currentTime + this.envelopes.amplitude.attack);
-        gain.gain.exponentialRampToValueAtTime(velocity * this.envelopes.amplitude.sustain, this.audioCtx.currentTime + this.envelopes.amplitude.attack + this.envelopes.amplitude.decay);
+        if (this.envelopes.amplitude.attack > 0) {
+            gain.gain.setValueAtTime(0, this.audioCtx.currentTime);
+            gain.gain.setValueCurveAtTime(calculateEnvelopeCurveArray(0, velocity, this.attackShape), this.audioCtx.currentTime, this.envelopes.amplitude.attack);
+        } else {
+            gain.gain.setValueAtTime(velocity, this.audioCtx.currentTime);
+        }
+        if (this.envelopes.amplitude.decay > 0) {
+            gain.gain.setValueCurveAtTime(calculateEnvelopeCurveArray(velocity, velocity * this.envelopes.amplitude.sustain, this.decayShape), this.audioCtx.currentTime + this.envelopes.amplitude.attack, this.envelopes.amplitude.decay);
+        } else {
+            gain.gain.setValueAtTime(velocity * this.envelopes.amplitude.sustain, this.audioCtx.currentTime + this.envelopes.amplitude.attack);
+        }
         const frequency = createConstantSource(this.audioCtx, this.noteNumberToFrequency(noteNumber));
         const oscillators = [];
         for (let settings of this.oscillatorSettings) {
@@ -286,10 +319,17 @@ export class Synth {
         this.filterSettings.cutoff.connect(filter_cutoff);
         this.filterSettings.resonance.connect(filter.Q);
         const filter_envelope = this.audioCtx.createGain();
-        filter_envelope.gain.setValueAtTime(0, this.audioCtx.currentTime);
-        // TODO: Why does this sound correct with linear?
-        filter_envelope.gain.linearRampToValueAtTime(1, this.audioCtx.currentTime + this.envelopes.filter.attack);
-        filter_envelope.gain.linearRampToValueAtTime(this.envelopes.filter.sustain, this.audioCtx.currentTime + this.envelopes.filter.attack + this.envelopes.filter.decay);
+        if (this.envelopes.filter.attack > 0) {
+            filter_envelope.gain.setValueAtTime(0, this.audioCtx.currentTime);
+            filter_envelope.gain.setValueCurveAtTime(calculateEnvelopeCurveArray(0, 1, this.attackShape), this.audioCtx.currentTime, this.envelopes.filter.attack);
+        } else {
+            filter_envelope.gain.setValueAtTime(1, this.audioCtx.currentTime);
+        }
+        if (this.envelopes.filter.decay > 0) {
+            filter_envelope.gain.setValueCurveAtTime(calculateEnvelopeCurveArray(1, this.envelopes.filter.sustain, this.decayShape), this.audioCtx.currentTime + this.envelopes.filter.attack, this.envelopes.filter.decay);
+        } else {
+            filter_envelope.gain.setValueAtTime(this.envelopes.filter.sustain, this.audioCtx.currentTime + this.envelopes.filter.attack);
+        }
         this.filterSettings.envelope.connect(filter_envelope);
         filter_envelope.connect(filter_cutoff);
         filter_cutoff.connect(filter.frequency);
@@ -305,13 +345,22 @@ export class Synth {
         if (note) {
             const currentGain = note.gain.gain.value;
             note.gain.gain.cancelScheduledValues(this.audioCtx.currentTime);
-            note.gain.gain.setValueAtTime(currentGain, this.audioCtx.currentTime);
-            note.gain.gain.exponentialRampToValueAtTime(1e-5, this.audioCtx.currentTime + this.envelopes.amplitude.release);
-            note.gain.gain.setValueAtTime(0, this.audioCtx.currentTime + this.envelopes.amplitude.release);
+            if (this.envelopes.amplitude.release > 0) {
+                note.gain.gain.setValueAtTime(currentGain, this.audioCtx.currentTime);
+                note.gain.gain.setValueCurveAtTime(calculateEnvelopeCurveArray(currentGain, 0, this.releaseShape), this.audioCtx.currentTime, this.envelopes.amplitude.release);
+                // TODO: Is this necessary?
+                note.gain.gain.setValueAtTime(0, this.audioCtx.currentTime + this.envelopes.amplitude.release);
+            } else {
+                note.gain.gain.setValueAtTime(0, this.audioCtx.currentTime);
+            }
             const currentEnvelope = note.filter_envelope.gain.value;
             note.filter_envelope.gain.cancelScheduledValues(this.audioCtx.currentTime);
-            note.filter_envelope.gain.setValueAtTime(currentEnvelope, this.audioCtx.currentTime);
-            note.filter_envelope.gain.linearRampToValueAtTime(0, this.audioCtx.currentTime + this.envelopes.filter.release);
+            if (this.envelopes.filter.release > 0) {
+                note.filter_envelope.gain.setValueAtTime(currentEnvelope, this.audioCtx.currentTime);
+                note.filter_envelope.gain.setValueCurveAtTime(calculateEnvelopeCurveArray(currentEnvelope, 0, this.releaseShape), this.audioCtx.currentTime, this.envelopes.filter.release);
+            } else {
+                note.filter_envelope.gain.setValueAtTime(0, this.audioCtx.currentTime);
+            }
             if (note.oscillators.length > 0 && note.oscillators[0].voices.length > 0) {
                 // Cleanup when the first oscillator ends
                 note.oscillators[0].voices[0].oscillator.onended = () => {

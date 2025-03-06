@@ -1,6 +1,6 @@
 {
   "name": "@c-wiren/synth",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Polyphonic synthesizer with analog-like features based on native Web Audio API nodes",
   "main": "dist/synth.js",
   "types": "dist/synth.d.ts",
