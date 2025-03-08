@@ -1,3 +1,5 @@
+import ExponentialProcessor from "./exponential-processor";
+
 type DeepPartial<T> = T extends object ? {
     [P in keyof T]?: DeepPartial<T[P]>;
 } : T;
@@ -29,7 +31,7 @@ interface Note {
     noteNumber: number;
     gain: GainNode;
     filter: BiquadFilterNode;
-    filter_cutoff: GainNode;
+    filter_cutoff: AudioWorkletNode;
     filter_envelope: GainNode;
     frequency: ConstantSourceNode;
     oscillators: Oscillator[];
@@ -65,8 +67,18 @@ export interface Preset {
     };
 }
 
-function dBToGain(value: number): number {
+export function dBToGain(value: number): number {
     return Math.pow(10, value / 20);
+}
+
+// Convert an exponential value 0-1 to a frequency between 20 Hz and 20 kHz
+export function valueToFrequency(value: number): number {
+    return 20 * Math.pow(1000, value);
+}
+
+// Convert a frequency between 20 Hz and 20 kHz to an exponential value 0-1
+export function frequencyToValue(frequency: number): number {
+    return Math.log(frequency / 20) / Math.log(1000);
 }
 
 function calculateDetune(unison: number, voice: number): number {
@@ -114,6 +126,11 @@ function defaultOscillatorSettings(audioCtx: AudioContext, on: boolean): Oscilla
     return { on, semitones: 0, fine: 0, unison: 1, detune: 0, pitch: createConstantSource(audioCtx, 1), waveform: Waveform.Sawtooth };
 }
 
+async function loadAudioWorkletProcessor(audioCtx: AudioContext, processorCode: string): Promise<void> {
+    const blob = new Blob([processorCode], { type: 'application/javascript' });
+    return audioCtx.audioWorklet.addModule(URL.createObjectURL(blob));
+}
+
 export class Synth {
     audioCtx: AudioContext;
     notes: Map<number, Note>;
@@ -148,14 +165,18 @@ export class Synth {
         this.oscillatorSettings.push(defaultOscillatorSettings(audioCtx, true));
         this.oscillatorSettings.push(defaultOscillatorSettings(audioCtx, false));
         this.filterSettings = {
-            cutoff: createConstantSource(audioCtx, 20000),
+            cutoff: createConstantSource(audioCtx, 1.0),
             resonance: createConstantSource(audioCtx, 0.5),
-            envelope: createConstantSource(audioCtx, 0)
+            envelope: createConstantSource(audioCtx, 0.0)
         };
         this.masterVolume = -12; // dB
         this.masterGain = audioCtx.createGain();
-        this.masterGain.gain.setValueAtTime(dBToGain(this.masterVolume), audioCtx.currentTime);
+        this.setMasterVolume(this.masterVolume);
         this.masterGain.connect(audioCtx.destination);
+    }
+
+    async init(): Promise<void> {
+        return loadAudioWorkletProcessor(this.audioCtx, ExponentialProcessor);
     }
 
     applyPreset(preset: DeepPartial<Preset>) {
@@ -312,8 +333,13 @@ export class Synth {
             }
             oscillators.push({ voices, frequency: oscillator_frequency, gain: oscillator_gain });
         }
-        const filter_cutoff = this.audioCtx.createGain();
-        filter_cutoff.gain.setValueAtTime(1, this.audioCtx.currentTime);
+        // Node to convert exponential value 0-1 to frequency between 20 Hz and 20 kHz
+        let filter_cutoff: AudioWorkletNode;
+        try {
+            filter_cutoff = new AudioWorkletNode(this.audioCtx, "exponential-processor", { processorOptions: { coefficient: 20, base: 1000 } });
+        } catch (error) {
+            throw new Error(`Failed to create AudioWorkletNode "exponential-processor". Did you run and await init()?`);
+        }
         const filter = this.audioCtx.createBiquadFilter();
         filter.type = "lowpass";
         this.filterSettings.cutoff.connect(filter_cutoff);
@@ -401,5 +427,14 @@ export class Synth {
                 }
             }
         }
+    }
+
+    getMasterVolume(): number {
+        return this.masterVolume;
+    }
+
+    setMasterVolume(volume: number) {
+        this.masterVolume = volume;
+        this.masterGain.gain.setValueAtTime(dBToGain(this.masterVolume), this.audioCtx.currentTime);
     }
 }
