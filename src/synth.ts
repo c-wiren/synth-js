@@ -35,6 +35,7 @@ interface Note {
     filter: BiquadFilterNode;
     filter_cutoff: AudioWorkletNode;    // filter cutoff frequency
     filter_envelope: GainNode;          // filter envelope
+    filter_keyboard: GainNode;          // filter keyboard tracking
     frequency: ConstantSourceNode;      // note frequency
     oscillators: Oscillator[];
 }
@@ -81,6 +82,7 @@ export interface Preset {
         cutoff: number;     // cutoff frequency 0-1, representing 20 Hz to 20 kHz
         resonance: number;  // resonance
         envelope: number;   // filter envelope contribution to cutoff frequency, 0-1
+        keyboard: number;   // keyboard tracking, 0-1
     };
 }
 
@@ -219,6 +221,12 @@ function noteNumberToFrequency(noteNumber: number, tuning: number): number {
     return tuning * Math.pow(2, (noteNumber - 69) / 12);
 }
 
+// Convert a MIDI note number to a filter value between 0 and 1, pivot at middle C
+function noteNumberToFilterValue(noteNumber: number): number {
+    const middleC = 60;
+    return ((noteNumber - middleC) / 12) * Math.log(2) / Math.log(1000);
+}
+
 export class Synth {
     private audioCtx: AudioContext;
     private notes: Map<number, Note>;
@@ -231,9 +239,10 @@ export class Synth {
 
     private oscillatorSettings: OscillatorSettings[];
     private filterSettings: {
-        cutoff: ConstantSourceNode; // Hz
+        cutoff: ConstantSourceNode;    // 0-1
         resonance: ConstantSourceNode; // Q
-        envelope: ConstantSourceNode; // Hz
+        envelope: ConstantSourceNode;  // 0-1
+        keyboard: ConstantSourceNode;  // 0-1
     };
     private masterVolume: number; // dB
     private masterGain: GainNode;
@@ -248,9 +257,10 @@ export class Synth {
             { on: false, volume: 0, semitones: 0, fine: 0, unison: 1, detune: 0, waveform: Waveform.Sawtooth, pwm: 0 }
         ],
         filter: {
-            cutoff: 1.0,
+            cutoff: 1,
             resonance: 0.5,
-            envelope: 0.0
+            envelope: 0,
+            keyboard: 0
         }
     };
 
@@ -265,7 +275,8 @@ export class Synth {
         this.filterSettings = {
             cutoff: createConstantSource(audioCtx, Synth.defaultPreset.filter.cutoff),
             resonance: createConstantSource(audioCtx, Synth.defaultPreset.filter.resonance),
-            envelope: createConstantSource(audioCtx, Synth.defaultPreset.filter.envelope)
+            envelope: createConstantSource(audioCtx, Synth.defaultPreset.filter.envelope),
+            keyboard: createConstantSource(audioCtx, Synth.defaultPreset.filter.keyboard)
         };
         this.masterVolume = -12; // dB
         this.masterGain = audioCtx.createGain();
@@ -341,6 +352,9 @@ export class Synth {
             if (preset.filter.envelope !== undefined) {
                 this.filterSettings.envelope.offset.setValueAtTime(preset.filter.envelope, this.audioCtx.currentTime);
             }
+            if (preset.filter.keyboard !== undefined) {
+                this.filterSettings.keyboard.offset.setValueAtTime(preset.filter.keyboard, this.audioCtx.currentTime);
+            }
         }
     }
 
@@ -364,7 +378,8 @@ export class Synth {
             filter: {
                 cutoff: this.filterSettings.cutoff.offset.value,
                 resonance: this.filterSettings.resonance.offset.value,
-                envelope: this.filterSettings.envelope.offset.value
+                envelope: this.filterSettings.envelope.offset.value,
+                keyboard: this.filterSettings.keyboard.offset.value
             }
         };
     }
@@ -422,10 +437,14 @@ export class Synth {
         } catch (error) {
             throw new Error(`Failed to create AudioWorkletNode "exponential-processor". Did you run and await init()?`);
         }
+
+        // Filter
         const filter = this.audioCtx.createBiquadFilter();
         filter.type = "lowpass";
         this.filterSettings.cutoff.connect(filter_cutoff);
         this.filterSettings.resonance.connect(filter.Q);
+
+        // Filter envelope
         const filter_envelope = this.audioCtx.createGain();
         if (this.envelopes.filter.attack > 0) {
             filter_envelope.gain.setValueAtTime(0, this.audioCtx.currentTime);
@@ -439,13 +458,20 @@ export class Synth {
             filter_envelope.gain.setValueAtTime(this.envelopes.filter.sustain, this.audioCtx.currentTime + this.envelopes.filter.attack);
         }
         this.filterSettings.envelope.connect(filter_envelope);
+
+        // Keyboard tracking
+        const filter_keyboard = this.audioCtx.createGain();
+        filter_keyboard.gain.setValueAtTime(noteNumberToFilterValue(noteNumber), this.audioCtx.currentTime);
+        this.filterSettings.keyboard.connect(filter_keyboard);
+        filter_keyboard.connect(filter_envelope);
+
         filter_envelope.connect(filter_cutoff);
         filter_cutoff.connect(filter.frequency);
         gain.connect(filter);
         filter.connect(this.masterGain);
 
         this.noteAbort(noteNumber);
-        this.notes.set(noteNumber, { noteNumber, gain, filter, filter_cutoff, filter_envelope, frequency, oscillators });
+        this.notes.set(noteNumber, { noteNumber, gain, filter, filter_cutoff, filter_envelope, filter_keyboard, frequency, oscillators });
     }
 
     noteOff(noteNumber: number) {
