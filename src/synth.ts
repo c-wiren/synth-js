@@ -32,22 +32,24 @@ interface Oscillator {
 interface Note {
     noteNumber: number;                 // MIDI note number
     gain: GainNode;                     // amplitude envelope
-    filter: BiquadFilterNode;           // filter
+    filter: BiquadFilterNode;
     filter_cutoff: AudioWorkletNode;    // filter cutoff frequency
     filter_envelope: GainNode;          // filter envelope
     frequency: ConstantSourceNode;      // note frequency
-    oscillators: Oscillator[];          // oscillators
+    oscillators: Oscillator[];
 }
 
 interface OscillatorSettings {
-    on: boolean;                // on/off
-    semitones: number;          // transpose in semitones
-    fine: number;               // fine tune in cents
-    unison: number;             // number of voices
-    detune: number;             // unison detune in cents
-    pitch: ConstantSourceNode;  // pitch multiplier
-    waveform: Waveform;         // waveform
-    pwm: number;                // 0-1 for square wave, 0 for regular
+    on: boolean;                        // on/off
+    gain: number;                       // 0-1
+    compound_gain: ConstantSourceNode;  // gain and unison multiplier, 0-1
+    semitones: number;                  // transpose in semitones
+    fine: number;                       // fine tune in cents
+    unison: number;                     // number of voices
+    detune: number;                     // unison detune in cents
+    pitch: ConstantSourceNode;          // pitch multiplier
+    waveform: Waveform;                 // waveform
+    pwm: number;                        // 0-1 for square wave, 0 for regular
 }
 
 export interface ADSR {
@@ -67,6 +69,7 @@ export interface Preset {
     },
     oscillators: {
         on: boolean;        // on/off
+        volume: number;     // dB
         semitones: number;  // transpose in semitones
         fine: number;       // fine tune in cents
         unison: number;     // number of voices
@@ -100,6 +103,10 @@ function validatePreset(preset: DeepPartial<Preset>) {
 
 export function dBToGain(value: number): number {
     return Math.pow(10, value / 20);
+}
+
+export function gainTodB(value: number): number {
+    return 20 * Math.log10(value);
 }
 
 // Convert an exponential value 0-1 to a frequency between 20 Hz and 20 kHz
@@ -154,7 +161,7 @@ function createConstantSource(audioCtx: AudioContext, value: number): ConstantSo
 }
 
 function defaultOscillatorSettings(audioCtx: AudioContext, on: boolean): OscillatorSettings {
-    return { on, semitones: 0, fine: 0, unison: 1, detune: 0, pitch: createConstantSource(audioCtx, 1), waveform: Waveform.Sawtooth, pwm: 0 };
+    return { on, gain: 1, compound_gain: createConstantSource(audioCtx, 1), semitones: 0, fine: 0, unison: 1, detune: 0, pitch: createConstantSource(audioCtx, 1), waveform: Waveform.Sawtooth, pwm: 0 };
 }
 
 async function loadAudioWorkletProcessor(audioCtx: AudioContext, processorCode: string): Promise<void> {
@@ -237,8 +244,8 @@ export class Synth {
             filter: { attack: 0, decay: 5, sustain: 1, release: 1, attackShape: 0, decayShape: -2, releaseShape: -5 }
         },
         oscillators: [
-            { on: true, semitones: 0, fine: 0, unison: 1, detune: 0, waveform: Waveform.Sawtooth, pwm: 0 },
-            { on: false, semitones: 0, fine: 0, unison: 1, detune: 0, waveform: Waveform.Sawtooth, pwm: 0 }
+            { on: true, volume: 0, semitones: 0, fine: 0, unison: 1, detune: 0, waveform: Waveform.Sawtooth, pwm: 0 },
+            { on: false, volume: 0, semitones: 0, fine: 0, unison: 1, detune: 0, waveform: Waveform.Sawtooth, pwm: 0 }
         ],
         filter: {
             cutoff: 1.0,
@@ -286,6 +293,7 @@ export class Synth {
             for (let i = 0; i < preset.oscillators.length; i++) {
                 if (preset.oscillators[i]) {
                     let updatePitch = false;
+                    let updateGain = false;
                     if (preset.oscillators[i]!.on !== undefined) {
                         this.oscillatorSettings[i].on = preset.oscillators[i]!.on!;
                     }
@@ -302,12 +310,23 @@ export class Synth {
                     }
                     if (preset.oscillators[i]!.unison !== undefined) {
                         this.oscillatorSettings[i].unison = preset.oscillators[i]!.unison!;
+                        updateGain = true;
                     }
                     if (preset.oscillators[i]!.detune !== undefined) {
                         this.oscillatorSettings[i].detune = preset.oscillators[i]!.detune!;
                     }
                     if (preset.oscillators[i]!.waveform !== undefined) {
                         this.oscillatorSettings[i].waveform = preset.oscillators[i]!.waveform!;
+                    }
+                    if (preset.oscillators[i]!.pwm !== undefined) {
+                        this.oscillatorSettings[i].pwm = preset.oscillators[i]!.pwm!;
+                    }
+                    if (preset.oscillators[i]!.volume !== undefined) {
+                        this.oscillatorSettings[i].gain = dBToGain(preset.oscillators[i]!.volume!);
+                        updateGain = true;
+                    }
+                    if (updateGain) {
+                        this.oscillatorSettings[i].compound_gain.offset.setValueAtTime(this.oscillatorSettings[i].gain * calculateUnisonGain(this.oscillatorSettings[i].unison), this.audioCtx.currentTime);
                     }
                 }
             }
@@ -334,6 +353,7 @@ export class Synth {
             },
             oscillators: this.oscillatorSettings.map(settings => ({
                 on: settings.on,
+                volume: gainTodB(settings.compound_gain.offset.value),
                 semitones: settings.semitones,
                 fine: settings.fine,
                 unison: settings.unison,
@@ -373,7 +393,8 @@ export class Synth {
             if (!settings.on) { continue; }
             const voices = [];
             const oscillator_gain = this.audioCtx.createGain();
-            oscillator_gain.gain.setValueAtTime(calculateUnisonGain(settings.unison), this.audioCtx.currentTime);
+            oscillator_gain.gain.setValueAtTime(0, this.audioCtx.currentTime);
+            settings.compound_gain.connect(oscillator_gain.gain);
             oscillator_gain.connect(gain);
             const oscillator_frequency = this.audioCtx.createGain();
             oscillator_frequency.gain.setValueAtTime(0, this.audioCtx.currentTime);
