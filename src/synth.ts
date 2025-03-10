@@ -1,70 +1,101 @@
 import ExponentialProcessor from "./exponential-processor";
 
+function assert(condition: any, message?: string): asserts condition {
+    if (!condition) {
+        throw new Error(message);
+    }
+}
+
 type DeepPartial<T> = T extends object ? {
     [P in keyof T]?: DeepPartial<T[P]>;
 } : T;
+
+export enum Waveform {
+    Sawtooth = 0,
+    Square = 1,
+    Sine = 2
+}
+
+// pure oscillator with panning
+interface Voice {
+    oscillator: OscillatorNode; // pure oscillator
+    panner: StereoPannerNode;   // panner per oscillator
+}
+
+// virtual oscillator that allows for unison and detune
+interface Oscillator {
+    voices: Voice[];        // voices containing actual oscillators
+    frequency: GainNode;    // frequency multiplier for all voices
+    gain: GainNode;
+}
+
+interface Note {
+    noteNumber: number;                 // MIDI note number
+    gain: GainNode;                     // amplitude envelope
+    filter: BiquadFilterNode;           // filter
+    filter_cutoff: AudioWorkletNode;    // filter cutoff frequency
+    filter_envelope: GainNode;          // filter envelope
+    frequency: ConstantSourceNode;      // note frequency
+    oscillators: Oscillator[];          // oscillators
+}
+
+interface OscillatorSettings {
+    on: boolean;                // on/off
+    semitones: number;          // transpose in semitones
+    fine: number;               // fine tune in cents
+    unison: number;             // number of voices
+    detune: number;             // unison detune in cents
+    pitch: ConstantSourceNode;  // pitch multiplier
+    waveform: Waveform;         // waveform
+    pwm: number;                // 0-1 for square wave, 0 for regular
+}
 
 export interface ADSR {
     attack: number; // seconds
     decay: number; // seconds
     sustain: number; // 0 to 1
     release: number; // seconds
-}
-
-interface Voice {
-    oscillator: OscillatorNode;
-    panner: StereoPannerNode;
-}
-
-interface Oscillator {
-    voices: Voice[];
-    frequency: GainNode;
-    gain: GainNode;
-}
-
-export enum Waveform {
-    Sawtooth = 0,
-    Square = 1
-}
-
-interface Note {
-    noteNumber: number;
-    gain: GainNode;
-    filter: BiquadFilterNode;
-    filter_cutoff: AudioWorkletNode;
-    filter_envelope: GainNode;
-    frequency: ConstantSourceNode;
-    oscillators: Oscillator[];
-}
-
-interface OscillatorSettings {
-    on: boolean; // on/off
-    semitones: number; // transpose in semitones
-    fine: number; // fine tune in cents
-    unison: number; // number of voices
-    detune: number; // unison detune in cents
-    pitch: ConstantSourceNode; // transpose
-    waveform: Waveform;
+    attackShape: number; // 0 is linear, positive is exponential, negative is logarithmic
+    decayShape: number; // 0 is linear, positive is exponential, negative is logarithmic
+    releaseShape: number; // 0 is linear, positive is exponential, negative is logarithmic
 }
 
 export interface Preset {
     envelopes: {
-        amplitude: ADSR;
-        filter: ADSR;
+        amplitude: ADSR; // amplitude envelope
+        filter: ADSR;    // filter envelope
     },
     oscillators: {
-        on: boolean;
-        semitones: number;
-        fine: number;
-        unison: number;
-        detune: number;
-        waveform: Waveform;
+        on: boolean;        // on/off
+        semitones: number;  // transpose in semitones
+        fine: number;       // fine tune in cents
+        unison: number;     // number of voices
+        detune: number;     // unison detune in cents
+        waveform: Waveform; // waveform
+        pwm: number;        // 0-1 for square wave, 0 for regular
     }[];
     filter: {
-        cutoff: number;
-        resonance: number;
-        envelope: number;
+        cutoff: number;     // cutoff frequency 0-1, representing 20 Hz to 20 kHz
+        resonance: number;  // resonance
+        envelope: number;   // filter envelope contribution to cutoff frequency, 0-1
     };
+}
+
+function validatePreset(preset: DeepPartial<Preset>) {
+    for (const envelope of [preset.envelopes?.amplitude, preset.envelopes?.filter]) {
+        if (!envelope) continue;
+        assert((envelope.attack ?? 0) >= 0, "Attack must be non-negative");
+        assert((envelope.decay ?? 0) >= 0, "Decay must be non-negative");
+        assert((envelope.sustain ?? 0) >= 0 && (envelope.sustain ?? 0) <= 1, "Sustain must be between 0 and 1");
+        assert((envelope.release ?? 0) >= 0, "Release must be non-negative");
+    }
+    for (const oscillator of preset.oscillators ?? []) {
+        if (!oscillator) continue;
+        assert((oscillator.unison ?? 1) >= 1, "Unison must be at least 1");
+    }
+    assert((preset.filter?.cutoff ?? 0) >= 0 && (preset.filter?.cutoff ?? 0) <= 1, "Cutoff must be between 0 and 1");
+    assert((preset.filter?.resonance ?? 0) >= 0, "Resonance must be non-negative");
+    assert((preset.filter?.envelope ?? 0) >= 0 && (preset.filter?.envelope ?? 0) <= 1, "Filter envelope must be between 0 and 1");
 }
 
 export function dBToGain(value: number): number {
@@ -123,7 +154,7 @@ function createConstantSource(audioCtx: AudioContext, value: number): ConstantSo
 }
 
 function defaultOscillatorSettings(audioCtx: AudioContext, on: boolean): OscillatorSettings {
-    return { on, semitones: 0, fine: 0, unison: 1, detune: 0, pitch: createConstantSource(audioCtx, 1), waveform: Waveform.Sawtooth };
+    return { on, semitones: 0, fine: 0, unison: 1, detune: 0, pitch: createConstantSource(audioCtx, 1), waveform: Waveform.Sawtooth, pwm: 0 };
 }
 
 async function loadAudioWorkletProcessor(audioCtx: AudioContext, processorCode: string): Promise<void> {
@@ -131,43 +162,103 @@ async function loadAudioWorkletProcessor(audioCtx: AudioContext, processorCode: 
     return audioCtx.audioWorklet.addModule(URL.createObjectURL(blob));
 }
 
-export class Synth {
-    audioCtx: AudioContext;
-    notes: Map<number, Note>;
-    tuning: number;
+function createPeriodicWave(audioCtx: AudioContext, waveform: Waveform, phase: number = 0, pwm: number = 0): PeriodicWave {
+    if (waveform === Waveform.Sine) {
+        const phaseAngle = phase * 2 * Math.PI;
+        return audioCtx.createPeriodicWave(new Float32Array([0, Math.cos(phaseAngle)]), new Float32Array([0, Math.sin(phaseAngle)]));
+    }
+    const size = 256;
+    const real = new Float32Array(size);
+    const imag = new Float32Array(size);
+    real[0] = 0;
+    imag[0] = 0;
+    switch (waveform) {
+        case Waveform.Sawtooth:
+            for (let i = 1; i < size; i++) {
+                const coefficient = 2 / (i * Math.PI);
+                const phaseAngle = phase * 2 * Math.PI;
+                real[i] = -coefficient * Math.sin(i * phaseAngle);
+                imag[i] = coefficient * Math.cos(i * phaseAngle);
+            }
+            break;
+        case Waveform.Square:
+            if (pwm < 0.01) {
+                for (let i = 1; i < size; i += 2) {
+                    const coefficient = 4 / (i * Math.PI);
+                    const phaseAngle = phase * 2 * Math.PI;
+                    real[i] = -coefficient * Math.sin(i * phaseAngle);
+                    imag[i] = coefficient * Math.cos(i * phaseAngle);
+                }
+            } else {
+                const dutyCycle = 0.5 - pwm * 0.49;
+                real[0] = 2 * dutyCycle - 1;
+                for (let i = 1; i < size; i++) {
+                    const coefficient = (2 / (i * Math.PI)) * Math.sin(i * Math.PI * dutyCycle);
+                    const phaseAngle = phase * 2 * Math.PI;
+                    real[i] = coefficient * Math.cos(i * phaseAngle);
+                    imag[i] = coefficient * Math.sin(i * phaseAngle);
+                }
+            }
+            break;
+    }
+    return audioCtx.createPeriodicWave(real, imag);
+}
 
-    envelopes: {
+function semitonesToMultiplier(semitones: number): number {
+    return Math.pow(2, semitones / 12);
+}
+
+function noteNumberToFrequency(noteNumber: number, tuning: number): number {
+    return tuning * Math.pow(2, (noteNumber - 69) / 12);
+}
+
+export class Synth {
+    private audioCtx: AudioContext;
+    private notes: Map<number, Note>;
+    private tuning: number;
+
+    private envelopes: {
         amplitude: ADSR,
         filter: ADSR;
     };
-    attackShape = 0;
-    decayShape = -2;
-    releaseShape = -5;
 
-    oscillatorSettings: OscillatorSettings[];
-    filterSettings: {
+    private oscillatorSettings: OscillatorSettings[];
+    private filterSettings: {
         cutoff: ConstantSourceNode; // Hz
         resonance: ConstantSourceNode; // Q
         envelope: ConstantSourceNode; // Hz
     };
-    masterVolume: number; // dB
-    masterGain: GainNode;
+    private masterVolume: number; // dB
+    private masterGain: GainNode;
+
+    static readonly defaultPreset: Preset = {
+        envelopes: {
+            amplitude: { attack: 0.001, decay: 5, sustain: 1, release: 0.2, attackShape: 0, decayShape: -2, releaseShape: -5 },
+            filter: { attack: 0, decay: 5, sustain: 1, release: 1, attackShape: 0, decayShape: -2, releaseShape: -5 }
+        },
+        oscillators: [
+            { on: true, semitones: 0, fine: 0, unison: 1, detune: 0, waveform: Waveform.Sawtooth, pwm: 0 },
+            { on: false, semitones: 0, fine: 0, unison: 1, detune: 0, waveform: Waveform.Sawtooth, pwm: 0 }
+        ],
+        filter: {
+            cutoff: 1.0,
+            resonance: 0.5,
+            envelope: 0.0
+        }
+    };
 
     constructor(audioCtx: AudioContext) {
         this.audioCtx = audioCtx;
         this.notes = new Map();
         this.tuning = 440;
-        this.envelopes = {
-            amplitude: { attack: 0.001, decay: 5.0, sustain: 1.0, release: 0.2 },
-            filter: { attack: 0.0, decay: 5.0, sustain: 1.0, release: 1.0 }
-        };
+        this.envelopes = Synth.defaultPreset.envelopes;
         this.oscillatorSettings = [];
         this.oscillatorSettings.push(defaultOscillatorSettings(audioCtx, true));
         this.oscillatorSettings.push(defaultOscillatorSettings(audioCtx, false));
         this.filterSettings = {
-            cutoff: createConstantSource(audioCtx, 1.0),
-            resonance: createConstantSource(audioCtx, 0.5),
-            envelope: createConstantSource(audioCtx, 0.0)
+            cutoff: createConstantSource(audioCtx, Synth.defaultPreset.filter.cutoff),
+            resonance: createConstantSource(audioCtx, Synth.defaultPreset.filter.resonance),
+            envelope: createConstantSource(audioCtx, Synth.defaultPreset.filter.envelope)
         };
         this.masterVolume = -12; // dB
         this.masterGain = audioCtx.createGain();
@@ -175,11 +266,14 @@ export class Synth {
         this.masterGain.connect(audioCtx.destination);
     }
 
+    // Initialize resources, must be called before playing any notes
     async init(): Promise<void> {
         return loadAudioWorkletProcessor(this.audioCtx, ExponentialProcessor);
     }
 
+    // Apply a preset overwriting the current settings, can be partial
     applyPreset(preset: DeepPartial<Preset>) {
+        validatePreset(preset);
         if (preset.envelopes) {
             if (preset.envelopes.amplitude) {
                 Object.assign(this.envelopes.amplitude, preset.envelopes.amplitude);
@@ -204,7 +298,7 @@ export class Synth {
                         updatePitch = true;
                     }
                     if (updatePitch) {
-                        this.oscillatorSettings[i].pitch.offset.setValueAtTime(this.semitonesToMultiplier(this.oscillatorSettings[i].semitones + this.oscillatorSettings[i].fine / 100), this.audioCtx.currentTime);
+                        this.oscillatorSettings[i].pitch.offset.setValueAtTime(semitonesToMultiplier(this.oscillatorSettings[i].semitones + this.oscillatorSettings[i].fine / 100), this.audioCtx.currentTime);
                     }
                     if (preset.oscillators[i]!.unison !== undefined) {
                         this.oscillatorSettings[i].unison = preset.oscillators[i]!.unison!;
@@ -231,6 +325,7 @@ export class Synth {
         }
     }
 
+    // Export the current settings as a preset
     exportPreset(): Preset {
         return {
             envelopes: {
@@ -243,7 +338,8 @@ export class Synth {
                 fine: settings.fine,
                 unison: settings.unison,
                 detune: settings.detune,
-                waveform: settings.waveform
+                waveform: settings.waveform,
+                pwm: settings.pwm
             })),
             filter: {
                 cutoff: this.filterSettings.cutoff.offset.value,
@@ -253,42 +349,7 @@ export class Synth {
         };
     }
 
-    createPeriodicWave(audioCtx: AudioContext, waveform: Waveform, phase: number = 0): PeriodicWave {
-        const size = 256;
-        const real = new Float32Array(size);
-        const imag = new Float32Array(size);
-        real[0] = 0;
-        imag[0] = 0;
-        switch (waveform) {
-            case Waveform.Sawtooth:
-                for (let i = 1; i < size; i++) {
-                    const coefficient = 2 / (i * Math.PI);
-                    const phaseAngle = phase * 2 * Math.PI;
-                    real[i] = -coefficient * Math.sin(i * phaseAngle);
-                    imag[i] = coefficient * Math.cos(i * phaseAngle);
-                }
-                break;
-            case Waveform.Square:
-                for (let i = 1; i < size; i += 2) {
-                    const coefficient = 4 / (i * Math.PI);
-                    const phaseAngle = phase * 2 * Math.PI;
-                    real[i] = -coefficient * Math.sin(i * phaseAngle);
-                    imag[i] = coefficient * Math.cos(i * phaseAngle);
-                }
-                break;
-        }
-        return audioCtx.createPeriodicWave(real, imag);
-    }
-
-    semitonesToMultiplier(semitones: number): number {
-        return Math.pow(2, semitones / 12);
-    }
-
-    noteNumberToFrequency(noteNumber: number): number {
-        return this.tuning * Math.pow(2, (noteNumber - 69) / 12);
-    }
-
-    noteOn(noteNumber: number, velocity: number = 1.0) {
+    noteOn(noteNumber: number, velocity: number = 1) {
         if (velocity === 0) {
             this.noteOff(noteNumber);
             return;
@@ -297,16 +358,16 @@ export class Synth {
         const gain = this.audioCtx.createGain();
         if (this.envelopes.amplitude.attack > 0) {
             gain.gain.setValueAtTime(0, this.audioCtx.currentTime);
-            gain.gain.setValueCurveAtTime(calculateEnvelopeCurveArray(0, velocity, this.attackShape), this.audioCtx.currentTime, this.envelopes.amplitude.attack);
+            gain.gain.setValueCurveAtTime(calculateEnvelopeCurveArray(0, velocity, this.envelopes.amplitude.attackShape), this.audioCtx.currentTime, this.envelopes.amplitude.attack);
         } else {
             gain.gain.setValueAtTime(velocity, this.audioCtx.currentTime);
         }
         if (this.envelopes.amplitude.decay > 0) {
-            gain.gain.setValueCurveAtTime(calculateEnvelopeCurveArray(velocity, velocity * this.envelopes.amplitude.sustain, this.decayShape), this.audioCtx.currentTime + this.envelopes.amplitude.attack, this.envelopes.amplitude.decay);
+            gain.gain.setValueCurveAtTime(calculateEnvelopeCurveArray(velocity, velocity * this.envelopes.amplitude.sustain, this.envelopes.amplitude.decayShape), this.audioCtx.currentTime + this.envelopes.amplitude.attack, this.envelopes.amplitude.decay);
         } else {
             gain.gain.setValueAtTime(velocity * this.envelopes.amplitude.sustain, this.audioCtx.currentTime + this.envelopes.amplitude.attack);
         }
-        const frequency = createConstantSource(this.audioCtx, this.noteNumberToFrequency(noteNumber));
+        const frequency = createConstantSource(this.audioCtx, noteNumberToFrequency(noteNumber, this.tuning));
         const oscillators = [];
         for (let settings of this.oscillatorSettings) {
             if (!settings.on) { continue; }
@@ -322,7 +383,7 @@ export class Synth {
                 const panner = this.audioCtx.createStereoPanner();
                 panner.pan.setValueAtTime(settings.unison > 1 ? i / (settings.unison - 1) * 2 - 1 : 0, this.audioCtx.currentTime);
                 const oscillator = this.audioCtx.createOscillator();
-                oscillator.setPeriodicWave(this.createPeriodicWave(this.audioCtx, settings.waveform, Math.random()));
+                oscillator.setPeriodicWave(createPeriodicWave(this.audioCtx, settings.waveform, Math.random(), settings.pwm));
                 oscillator.frequency.setValueAtTime(0, this.audioCtx.currentTime);
                 oscillator_frequency.connect(oscillator.frequency);
                 oscillator.detune.setValueAtTime(calculateDetune(settings.unison, i) * settings.detune, this.audioCtx.currentTime);
@@ -347,12 +408,12 @@ export class Synth {
         const filter_envelope = this.audioCtx.createGain();
         if (this.envelopes.filter.attack > 0) {
             filter_envelope.gain.setValueAtTime(0, this.audioCtx.currentTime);
-            filter_envelope.gain.setValueCurveAtTime(calculateEnvelopeCurveArray(0, 1, this.attackShape), this.audioCtx.currentTime, this.envelopes.filter.attack);
+            filter_envelope.gain.setValueCurveAtTime(calculateEnvelopeCurveArray(0, 1, this.envelopes.filter.attackShape), this.audioCtx.currentTime, this.envelopes.filter.attack);
         } else {
             filter_envelope.gain.setValueAtTime(1, this.audioCtx.currentTime);
         }
         if (this.envelopes.filter.decay > 0) {
-            filter_envelope.gain.setValueCurveAtTime(calculateEnvelopeCurveArray(1, this.envelopes.filter.sustain, this.decayShape), this.audioCtx.currentTime + this.envelopes.filter.attack, this.envelopes.filter.decay);
+            filter_envelope.gain.setValueCurveAtTime(calculateEnvelopeCurveArray(1, this.envelopes.filter.sustain, this.envelopes.filter.decayShape), this.audioCtx.currentTime + this.envelopes.filter.attack, this.envelopes.filter.decay);
         } else {
             filter_envelope.gain.setValueAtTime(this.envelopes.filter.sustain, this.audioCtx.currentTime + this.envelopes.filter.attack);
         }
@@ -373,9 +434,7 @@ export class Synth {
             note.gain.gain.cancelScheduledValues(this.audioCtx.currentTime);
             if (this.envelopes.amplitude.release > 0) {
                 note.gain.gain.setValueAtTime(currentGain, this.audioCtx.currentTime);
-                note.gain.gain.setValueCurveAtTime(calculateEnvelopeCurveArray(currentGain, 0, this.releaseShape), this.audioCtx.currentTime, this.envelopes.amplitude.release);
-                // TODO: Is this necessary?
-                note.gain.gain.setValueAtTime(0, this.audioCtx.currentTime + this.envelopes.amplitude.release);
+                note.gain.gain.setValueCurveAtTime(calculateEnvelopeCurveArray(currentGain, 0, this.envelopes.filter.releaseShape), this.audioCtx.currentTime, this.envelopes.amplitude.release);
             } else {
                 note.gain.gain.setValueAtTime(0, this.audioCtx.currentTime);
             }
@@ -383,7 +442,7 @@ export class Synth {
             note.filter_envelope.gain.cancelScheduledValues(this.audioCtx.currentTime);
             if (this.envelopes.filter.release > 0) {
                 note.filter_envelope.gain.setValueAtTime(currentEnvelope, this.audioCtx.currentTime);
-                note.filter_envelope.gain.setValueCurveAtTime(calculateEnvelopeCurveArray(currentEnvelope, 0, this.releaseShape), this.audioCtx.currentTime, this.envelopes.filter.release);
+                note.filter_envelope.gain.setValueCurveAtTime(calculateEnvelopeCurveArray(currentEnvelope, 0, this.envelopes.filter.releaseShape), this.audioCtx.currentTime, this.envelopes.filter.release);
             } else {
                 note.filter_envelope.gain.setValueAtTime(0, this.audioCtx.currentTime);
             }
@@ -426,6 +485,12 @@ export class Synth {
                     this.notes.delete(noteNumber);
                 }
             }
+        }
+    }
+
+    panic() {
+        for (let note of this.notes.values()) {
+            this.noteAbort(note.noteNumber);
         }
     }
 
