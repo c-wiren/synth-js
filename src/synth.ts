@@ -16,6 +16,12 @@ export enum Waveform {
     Sine = 2
 }
 
+export enum Mode {
+    Poly = 0,
+    Mono = 1,
+    Legato = 2
+}
+
 // pure oscillator with panning
 interface Voice {
     oscillator: OscillatorNode; // pure oscillator
@@ -38,6 +44,7 @@ interface Note {
     filter_keyboard: GainNode;          // filter keyboard tracking
     frequency: ConstantSourceNode;      // note frequency
     oscillators: Oscillator[];
+    released: boolean;
 }
 
 interface OscillatorSettings {
@@ -84,6 +91,9 @@ export interface Preset {
         envelope: number;   // filter envelope contribution to cutoff frequency, 0-1
         keyboard: number;   // keyboard tracking, 0-1
     };
+    glide: number;          // glide time in seconds
+    glide_always: boolean;  // glide always
+    mode: Mode;             // poly, mono, legato
 }
 
 function validatePreset(preset: DeepPartial<Preset>) {
@@ -231,6 +241,8 @@ export class Synth {
     private audioCtx: AudioContext;
     private notes: Map<number, Note>;
     private tuning: number;
+    private previousNoteNumber?: number; // for glide
+    private keyStack: number[]; // stack of pressed keys
 
     private envelopes: {
         amplitude: ADSR,
@@ -246,6 +258,9 @@ export class Synth {
     };
     private masterVolume: number; // dB
     private masterGain: GainNode;
+    private glide: number; // seconds
+    private glide_always: boolean;
+    private mode: Mode;
 
     static readonly defaultPreset: Preset = {
         envelopes: {
@@ -261,13 +276,17 @@ export class Synth {
             resonance: 0.5,
             envelope: 0,
             keyboard: 0
-        }
+        },
+        glide: 0,
+        glide_always: false,
+        mode: Mode.Poly
     };
 
     constructor(audioCtx: AudioContext) {
         this.audioCtx = audioCtx;
         this.notes = new Map();
         this.tuning = 440;
+        this.keyStack = [];
         this.envelopes = Synth.defaultPreset.envelopes;
         this.oscillatorSettings = [];
         this.oscillatorSettings.push(defaultOscillatorSettings(audioCtx, true));
@@ -278,6 +297,9 @@ export class Synth {
             envelope: createConstantSource(audioCtx, Synth.defaultPreset.filter.envelope),
             keyboard: createConstantSource(audioCtx, Synth.defaultPreset.filter.keyboard)
         };
+        this.glide = 0; // seconds
+        this.glide_always = false;
+        this.mode = Synth.defaultPreset.mode;
         this.masterVolume = -12; // dB
         this.masterGain = audioCtx.createGain();
         this.setMasterVolume(this.masterVolume);
@@ -290,7 +312,7 @@ export class Synth {
     }
 
     // Apply a preset overwriting the current settings, can be partial
-    applyPreset(preset: DeepPartial<Preset>) {
+    applyPartialPreset(preset: DeepPartial<Preset>) {
         validatePreset(preset);
         if (preset.envelopes) {
             if (preset.envelopes.amplitude) {
@@ -356,6 +378,26 @@ export class Synth {
                 this.filterSettings.keyboard.offset.setValueAtTime(preset.filter.keyboard, this.audioCtx.currentTime);
             }
         }
+        if (preset.glide !== undefined) {
+            this.glide = preset.glide;
+        }
+        if (preset.glide_always !== undefined) {
+            this.glide_always = preset.glide_always;
+        }
+        if (preset.mode !== undefined) {
+            this.mode = preset.mode;
+            if (this.mode !== Mode.Poly) {
+                for (let note of this.notes.values()) {
+                    if (note.noteNumber !== this.keyStack[this.keyStack.length - 1]) {
+                        this.noteAbort(note.noteNumber);
+                    }
+                }
+            }
+        }
+    }
+
+    applyPreset(preset: Preset) {
+        this.applyPartialPreset({ ...Synth.defaultPreset, ...preset });
     }
 
     // Export the current settings as a preset
@@ -380,13 +422,58 @@ export class Synth {
                 resonance: this.filterSettings.resonance.offset.value,
                 envelope: this.filterSettings.envelope.offset.value,
                 keyboard: this.filterSettings.keyboard.offset.value
-            }
+            },
+            glide: this.glide,
+            glide_always: this.glide_always,
+            mode: this.mode
         };
+    }
+
+    // Handle legato transitions
+    private noteOnLegato(noteNumber: number): boolean {
+        if (this.notes.size > 0) {
+            let foundNote;
+            for (let note of this.notes.values()) {
+                if (foundNote === undefined && !note.released) {
+                    foundNote = note;
+                } else {
+                    this.noteAbort(note.noteNumber);
+                }
+            }
+            if (foundNote) {
+                const note = foundNote;
+                note.frequency.offset.cancelScheduledValues(this.audioCtx.currentTime);
+                note.filter_keyboard.gain.cancelScheduledValues(this.audioCtx.currentTime);
+                if (this.glide > 0) {
+                    note.frequency.offset.setValueAtTime(note.frequency.offset.value, this.audioCtx.currentTime);
+                    const thisFrequency = noteNumberToFrequency(noteNumber, this.tuning);
+                    note.frequency.offset.exponentialRampToValueAtTime(thisFrequency, this.audioCtx.currentTime + this.glide);
+                    note.filter_keyboard.gain.setValueAtTime(note.filter_keyboard.gain.value, this.audioCtx.currentTime);
+                    note.filter_keyboard.gain.linearRampToValueAtTime(noteNumberToFilterValue(noteNumber), this.audioCtx.currentTime + this.glide);
+                } else {
+                    note.frequency.offset.setValueAtTime(noteNumberToFrequency(noteNumber, this.tuning), this.audioCtx.currentTime);
+                    note.filter_keyboard.gain.setValueAtTime(noteNumberToFilterValue(noteNumber), this.audioCtx.currentTime);
+                }
+                const previousNoteNumber = note.noteNumber;
+                note.noteNumber = noteNumber;
+                this.notes.set(noteNumber, note);
+                this.notes.delete(previousNoteNumber);
+                this.previousNoteNumber = noteNumber;
+                return true;
+            }
+        }
+        return false;
     }
 
     noteOn(noteNumber: number, velocity: number = 1) {
         if (velocity === 0) {
             this.noteOff(noteNumber);
+            return;
+        }
+        this.keyStack = this.keyStack.filter(key => key !== noteNumber);
+        this.keyStack.push(noteNumber);
+        // Handle legato mode
+        if (this.mode == Mode.Legato && this.noteOnLegato(noteNumber)) {
             return;
         }
         // TODO: This should instead reuse the oscillators
@@ -403,6 +490,12 @@ export class Synth {
             gain.gain.setValueAtTime(velocity * this.envelopes.amplitude.sustain, this.audioCtx.currentTime + this.envelopes.amplitude.attack);
         }
         const frequency = createConstantSource(this.audioCtx, noteNumberToFrequency(noteNumber, this.tuning));
+        if (this.glide > 0 && this.previousNoteNumber !== undefined) {
+            const previousFrequency = noteNumberToFrequency(this.previousNoteNumber, this.tuning);
+            const thisFrequency = noteNumberToFrequency(noteNumber, this.tuning);
+            frequency.offset.setValueAtTime(previousFrequency, this.audioCtx.currentTime);
+            frequency.offset.exponentialRampToValueAtTime(thisFrequency, this.audioCtx.currentTime + this.glide);
+        }
         const oscillators = [];
         for (let settings of this.oscillatorSettings) {
             if (!settings.on) { continue; }
@@ -461,7 +554,12 @@ export class Synth {
 
         // Keyboard tracking
         const filter_keyboard = this.audioCtx.createGain();
-        filter_keyboard.gain.setValueAtTime(noteNumberToFilterValue(noteNumber), this.audioCtx.currentTime);
+        if (this.glide > 0 && this.previousNoteNumber !== undefined) {
+            filter_keyboard.gain.setValueAtTime(noteNumberToFilterValue(this.previousNoteNumber), this.audioCtx.currentTime);
+            filter_keyboard.gain.linearRampToValueAtTime(noteNumberToFilterValue(noteNumber), this.audioCtx.currentTime + this.glide);
+        } else {
+            filter_keyboard.gain.setValueAtTime(noteNumberToFilterValue(noteNumber), this.audioCtx.currentTime);
+        }
         this.filterSettings.keyboard.connect(filter_keyboard);
         filter_keyboard.connect(filter_envelope);
 
@@ -470,13 +568,32 @@ export class Synth {
         gain.connect(filter);
         filter.connect(this.masterGain);
 
-        this.noteAbort(noteNumber);
-        this.notes.set(noteNumber, { noteNumber, gain, filter, filter_cutoff, filter_envelope, filter_keyboard, frequency, oscillators });
+        if (this.mode == Mode.Poly) {
+            this.noteAbort(noteNumber);
+        } else if (this.mode == Mode.Mono) {
+            for (let note of this.notes.values()) {
+                this.noteAbort(note.noteNumber);
+            }
+        }
+        this.previousNoteNumber = noteNumber;
+        this.notes.set(noteNumber, { noteNumber, gain, filter, filter_cutoff, filter_envelope, filter_keyboard, frequency, oscillators, released: false });
     }
 
     noteOff(noteNumber: number) {
+        this.keyStack = this.keyStack.filter(key => key !== noteNumber);
+        if (this.previousNoteNumber === noteNumber && this.keyStack.length > 0) {
+            if (this.mode == Mode.Legato) {
+                return this.noteOnLegato(this.keyStack[this.keyStack.length - 1]);
+            } else if (this.mode == Mode.Mono) {
+                return this.noteOn(this.keyStack[this.keyStack.length - 1]);
+            }
+        }
         const note = this.notes.get(noteNumber);
         if (note) {
+            note.released = true;
+            if (this.previousNoteNumber === noteNumber && !this.glide_always) {
+                this.previousNoteNumber = undefined;
+            }
             const currentGain = note.gain.gain.value;
             note.gain.gain.cancelScheduledValues(this.audioCtx.currentTime);
             if (this.envelopes.amplitude.release > 0) {
@@ -536,6 +653,7 @@ export class Synth {
     }
 
     panic() {
+        this.keyStack = [];
         for (let note of this.notes.values()) {
             this.noteAbort(note.noteNumber);
         }
