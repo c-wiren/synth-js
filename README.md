@@ -7,12 +7,15 @@ Polyphonic synthesizer with analog-like features based on native Web Audio API n
 Web Audio API provides all components needed to make a fully-featured Polysynth, but the components are relatively low level, and requires a lot of work to get basic sounds. By putting these together, modelling the behavior of familiar analog synthesizers, we can easily recreate a wide range of sounds with just a few controls.
 
 - Two oscillators
-  - Saw and square waveforms
+  - Saw, Sine, and Square waveforms with PWM
   - Random phase
   - Fine tuning
   - Unison with stereo panning and detune
+  - Poly, Mono, and Legato mode with glide
 - Per note filter with cutoff, resonance, and Q-value
 - ADSR controls for amplitude and filter
+  - Adjustable envelope shape
+- Keyboard tracking filter
 
 ## Installation
 
