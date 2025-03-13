@@ -597,16 +597,41 @@ export class Synth {
             const currentGain = note.gain.gain.value;
             note.gain.gain.cancelScheduledValues(this.audioCtx.currentTime);
             if (this.envelopes.amplitude.release > 0) {
-                note.gain.gain.setValueAtTime(currentGain, this.audioCtx.currentTime);
-                note.gain.gain.setValueCurveAtTime(calculateEnvelopeCurveArray(currentGain, 0, this.envelopes.filter.releaseShape), this.audioCtx.currentTime, this.envelopes.amplitude.release);
+                try {
+                    note.gain.gain.setValueAtTime(currentGain, this.audioCtx.currentTime);
+                    note.gain.gain.setValueCurveAtTime(calculateEnvelopeCurveArray(currentGain, 0, this.envelopes.filter.releaseShape), this.audioCtx.currentTime, this.envelopes.amplitude.release);
+                } catch (err) {
+                    // Fallback for Firefox
+                    const new_gain = this.audioCtx.createGain();
+                    new_gain.gain.setValueAtTime(currentGain, this.audioCtx.currentTime);
+                    new_gain.gain.setValueCurveAtTime(calculateEnvelopeCurveArray(currentGain, 0, this.envelopes.filter.releaseShape), this.audioCtx.currentTime, this.envelopes.amplitude.release);
+                    new_gain.connect(note.filter);
+                    for (let oscillator of note.oscillators) {
+                        oscillator.gain.connect(new_gain);
+                    }
+                    note.gain.disconnect();
+                    note.gain = new_gain;
+                }
             } else {
                 note.gain.gain.setValueAtTime(0, this.audioCtx.currentTime);
             }
             const currentEnvelope = note.filter_envelope.gain.value;
             note.filter_envelope.gain.cancelScheduledValues(this.audioCtx.currentTime);
             if (this.envelopes.filter.release > 0) {
-                note.filter_envelope.gain.setValueAtTime(currentEnvelope, this.audioCtx.currentTime);
-                note.filter_envelope.gain.setValueCurveAtTime(calculateEnvelopeCurveArray(currentEnvelope, 0, this.envelopes.filter.releaseShape), this.audioCtx.currentTime, this.envelopes.filter.release);
+                try {
+                    note.filter_envelope.gain.setValueAtTime(currentEnvelope, this.audioCtx.currentTime);
+                    note.filter_envelope.gain.setValueCurveAtTime(calculateEnvelopeCurveArray(currentEnvelope, 0, this.envelopes.filter.releaseShape), this.audioCtx.currentTime, this.envelopes.filter.release);
+                } catch (err) {
+                    // Fallback for Firefox
+                    const new_envelope = this.audioCtx.createGain();
+                    new_envelope.gain.setValueAtTime(currentEnvelope, this.audioCtx.currentTime);
+                    new_envelope.gain.setValueCurveAtTime(calculateEnvelopeCurveArray(currentEnvelope, 0, this.envelopes.filter.releaseShape), this.audioCtx.currentTime, this.envelopes.filter.release);
+                    new_envelope.connect(note.filter_cutoff);
+                    this.filterSettings.envelope.connect(new_envelope);
+                    note.filter_keyboard.connect(new_envelope);
+                    note.filter_envelope.disconnect();
+                    note.filter_envelope = new_envelope;
+                }
             } else {
                 note.filter_envelope.gain.setValueAtTime(0, this.audioCtx.currentTime);
             }
