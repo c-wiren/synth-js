@@ -311,7 +311,7 @@ export class Synth {
         return loadAudioWorkletProcessor(this.audioCtx, ExponentialProcessor);
     }
 
-    // Apply a preset overwriting the current settings, can be partial
+    // Apply a preset overwriting the current settings, unspecified settings are kept
     applyPartialPreset(preset: DeepPartial<Preset>) {
         validatePreset(preset);
         if (preset.envelopes) {
@@ -396,7 +396,8 @@ export class Synth {
         }
     }
 
-    applyPreset(preset: Preset) {
+    // Apply a preset overwriting the current settings, unspecified settings are reset to default
+    applyPreset(preset: DeepPartial<Preset>) {
         this.applyPartialPreset({ ...Synth.defaultPreset, ...preset });
     }
 
