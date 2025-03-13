@@ -443,13 +443,15 @@ export class Synth {
             }
             if (foundNote) {
                 const note = foundNote;
+                const previousFrequency = note.frequency.offset.value;
+                const previousKeyboard = note.filter_keyboard.gain.value;
                 note.frequency.offset.cancelScheduledValues(this.audioCtx.currentTime);
                 note.filter_keyboard.gain.cancelScheduledValues(this.audioCtx.currentTime);
                 if (this.glide > 0) {
-                    note.frequency.offset.setValueAtTime(note.frequency.offset.value, this.audioCtx.currentTime);
+                    note.frequency.offset.setValueAtTime(previousFrequency, this.audioCtx.currentTime);
                     const thisFrequency = noteNumberToFrequency(noteNumber, this.tuning);
                     note.frequency.offset.exponentialRampToValueAtTime(thisFrequency, this.audioCtx.currentTime + this.glide);
-                    note.filter_keyboard.gain.setValueAtTime(note.filter_keyboard.gain.value, this.audioCtx.currentTime);
+                    note.filter_keyboard.gain.setValueAtTime(previousKeyboard, this.audioCtx.currentTime);
                     note.filter_keyboard.gain.linearRampToValueAtTime(noteNumberToFilterValue(noteNumber), this.audioCtx.currentTime + this.glide);
                 } else {
                     note.frequency.offset.setValueAtTime(noteNumberToFrequency(noteNumber, this.tuning), this.audioCtx.currentTime);
