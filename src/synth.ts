@@ -10,15 +10,23 @@ type DeepPartial<T> = T extends object ? {
     [P in keyof T]?: DeepPartial<T[P]>;
 } : T;
 
+/** Oscillator waveform */
 export enum Waveform {
+    /** Sawtooth: odd and even harmonics */
     Sawtooth = 0,
+    /** Square: odd harmonics */
     Square = 1,
+    /** Sine: no harmonics */
     Sine = 2
 }
 
+/** Synthesizer mode */
 export enum Mode {
+    /** Polyphonic */
     Poly = 0,
+    /** Monophonic, retrigger */
     Mono = 1,
+    /** Monophonic, legato */
     Legato = 2
 }
 
@@ -60,40 +68,69 @@ interface OscillatorSettings {
     pwm: number;                        // 0-1 for square wave, 0 for regular
 }
 
+/** Envelope settings, describes how a sound changes over time. */
 export interface ADSR {
-    attack: number; // seconds
-    decay: number; // seconds
-    sustain: number; // 0 to 1
-    release: number; // seconds
-    attackShape: number; // 0 is linear, positive is exponential, negative is logarithmic
-    decayShape: number; // 0 is linear, positive is exponential, negative is logarithmic
-    releaseShape: number; // 0 is linear, positive is exponential, negative is logarithmic
+    /** Duration of the attack phase, in seconds. */
+    attack: number;
+    /** Duration of the decay phase, in seconds. */
+    decay: number;
+    /** Sustain level, from 0 to 1. */
+    sustain: number;
+    /** Duration of the release phase, in seconds. */
+    release: number;
+    /** Shape of the attack curve: positive is exponential, negative is logarithmic. */
+    attackShape: number;
+    /** Shape of the decay curve: positive is exponential, negative is logarithmic. */
+    decayShape: number;
+    /** Shape of the release curve: positive is exponential, negative is logarithmic. */
+    releaseShape: number;
 }
 
+/** Configuration for a specific synth sound. Can be exported and applied. */
 export interface Preset {
+    /** Envelope settings, describes how a sound changes over time. */
     envelopes: {
-        amplitude: ADSR; // amplitude envelope
-        filter: ADSR;    // filter envelope
+        /** Amplitude envelope: controls the volume over time  */
+        amplitude: ADSR;
+        /** Filter envelope: controls the filter cutoff over time */
+        filter: ADSR;
     },
+    /** Oscillator settings */
     oscillators: {
+        /** Whether the oscillator is active. */
         on: boolean;        // on/off
+        /** Output level in decibels. */
         volume: number;     // dB
-        semitones: number;  // transpose in semitones
-        fine: number;       // fine tune in cents
-        unison: number;     // number of voices
-        detune: number;     // unison detune in cents
-        waveform: Waveform; // waveform
-        pwm: number;        // 0-1 for square wave, 0 for regular
+        /** Transpose in semitones. */
+        semitones: number;
+        /** Fine tune in cents. */
+        fine: number;
+        /** Number of voices for a wider sound. Combine with detune for a thicker sound. */
+        unison: number;
+        /** Unison detune in cents. */
+        detune: number;
+        /** Shape of the waveform. */
+        waveform: Waveform;
+        /** Pulse width modulation for square waves (0-1). */
+        pwm: number;
     }[];
+    /** Filter configuration */
     filter: {
-        cutoff: number;     // cutoff frequency 0-1, representing 20 Hz to 20 kHz
-        resonance: number;  // resonance
-        envelope: number;   // filter envelope contribution to cutoff frequency, 0-1
-        keyboard: number;   // keyboard tracking, 0-1
+        /** Cutoff frequency 0-1, representing 20 Hz to 20 kHz. */
+        cutoff: number;
+        /** Resonance/Q amount at the cutoff frequency. */
+        resonance: number;
+        /** Filter envelope depth, controlling how much the envelope affects cutoff (0-1). */
+        envelope: number;
+        /** Keyboard tracking depth, controlling how much the pitch affects cutoff (0-1). */
+        keyboard: number;
     };
-    glide: number;          // glide time in seconds
-    glide_always: boolean;  // glide always
-    mode: Mode;             // poly, mono, legato
+    /** Time in seconds for pitch transitions between notes. */
+    glide: number;
+    /** Whether glide is applied between all notes or only legato. */
+    glide_always: boolean;
+    /** Synthesizer mode/polyphony. */
+    mode: Mode;
 }
 
 function validatePreset(preset: DeepPartial<Preset>) {
@@ -113,20 +150,22 @@ function validatePreset(preset: DeepPartial<Preset>) {
     assert((preset.filter?.envelope ?? 0) >= 0 && (preset.filter?.envelope ?? 0) <= 1, "Filter envelope must be between 0 and 1");
 }
 
+/** Convert decibels to a gain multiplier. */
 export function dBToGain(value: number): number {
     return Math.pow(10, value / 20);
 }
 
+/** Convert gain multiplier to decibels.  */
 export function gainTodB(value: number): number {
     return 20 * Math.log10(value);
 }
 
-// Convert an exponential value 0-1 to a frequency between 20 Hz and 20 kHz
+/** Convert an exponential value (0-1) to a frequency between 20 Hz and 20 kHz. */
 export function valueToFrequency(value: number): number {
     return 20 * Math.pow(1000, value);
 }
 
-// Convert a frequency between 20 Hz and 20 kHz to an exponential value 0-1
+/** Convert a frequency between 20 Hz and 20 kHz to an exponential value (0-1). */
 export function frequencyToValue(frequency: number): number {
     return Math.log(frequency / 20) / Math.log(1000);
 }
@@ -237,6 +276,7 @@ function noteNumberToFilterValue(noteNumber: number): number {
     return ((noteNumber - middleC) / 12) * Math.log(2) / Math.log(1000);
 }
 
+/** Polyphonic synthesizer with analog-like features based on native Web Audio API nodes. */
 export class Synth {
     private audioCtx: AudioContext;
     private notes: Map<number, Note>;
@@ -262,6 +302,7 @@ export class Synth {
     private glide_always: boolean;
     private mode: Mode;
 
+    /** Default preset. Is used as a fallback for applyPreset(). */
     static readonly defaultPreset: Preset = {
         envelopes: {
             amplitude: { attack: 0.001, decay: 5, sustain: 1, release: 0.2, attackShape: 0, decayShape: -2, releaseShape: -5 },
@@ -306,12 +347,12 @@ export class Synth {
         this.masterGain.connect(audioCtx.destination);
     }
 
-    // Initialize resources, must be called before playing any notes
+    /** Initialize resources, must be called before playing any notes. */
     async init(): Promise<void> {
         return loadAudioWorkletProcessor(this.audioCtx, ExponentialProcessor);
     }
 
-    // Apply a preset overwriting the current settings, unspecified settings are kept
+    /** Apply a preset overwriting the current settings, unspecified settings are kept. */
     applyPartialPreset(preset: DeepPartial<Preset>) {
         validatePreset(preset);
         if (preset.envelopes) {
@@ -396,12 +437,12 @@ export class Synth {
         }
     }
 
-    // Apply a preset overwriting the current settings, unspecified settings are reset to default
+    /** Apply a preset overwriting the current settings, unspecified settings are reset to default. */
     applyPreset(preset: DeepPartial<Preset>) {
         this.applyPartialPreset({ ...Synth.defaultPreset, ...preset });
     }
 
-    // Export the current settings as a preset
+    /** Export the current settings as a preset. */
     exportPreset(): Preset {
         return {
             envelopes: {
@@ -468,6 +509,11 @@ export class Synth {
         return false;
     }
 
+    /** Trigger note on.
+     *
+     * @param noteNumber MIDI note number
+     * @param velocity Note velocity (0-1)
+     */
     noteOn(noteNumber: number, velocity: number = 1) {
         if (velocity === 0) {
             this.noteOff(noteNumber);
@@ -582,6 +628,10 @@ export class Synth {
         this.notes.set(noteNumber, { noteNumber, gain, filter, filter_cutoff, filter_envelope, filter_keyboard, frequency, oscillators, released: false });
     }
 
+    /** Trigger note off.
+     *
+     * @param noteNumber MIDI note number
+     */
     noteOff(noteNumber: number) {
         this.keyStack = this.keyStack.filter(key => key !== noteNumber);
         if (this.previousNoteNumber === noteNumber && this.keyStack.length > 0) {
@@ -652,6 +702,10 @@ export class Synth {
         }
     }
 
+    /** Immediately stop note.
+     *
+     * @param noteNumber MIDI note number
+     */
     noteAbort(noteNumber: number) {
         const note = this.notes.get(noteNumber);
         if (note) {
@@ -680,6 +734,7 @@ export class Synth {
         }
     }
 
+    /** Immediate reset. Aborts all notes. */
     panic() {
         this.keyStack = [];
         for (let note of this.notes.values()) {
@@ -687,10 +742,12 @@ export class Synth {
         }
     }
 
+    /** Get main output level in decibels. */
     getMasterVolume(): number {
         return this.masterVolume;
     }
 
+    /** Set main output level in decibels. */
     setMasterVolume(volume: number) {
         this.masterVolume = volume;
         this.masterGain.gain.setValueAtTime(dBToGain(this.masterVolume), this.audioCtx.currentTime);
