@@ -1,5 +1,3 @@
-import ExponentialProcessor from "./exponential-processor";
-
 function assert(condition: any, message?: string): asserts condition {
     if (!condition) {
         throw new Error(message);
@@ -47,7 +45,7 @@ interface Note {
     noteNumber: number;                 // MIDI note number
     gain: GainNode;                     // amplitude envelope
     filter: BiquadFilterNode;
-    filter_cutoff: AudioWorkletNode;    // filter cutoff frequency
+    filter_cutoff: WaveShaperNode;      // filter cutoff frequency
     filter_envelope: GainNode;          // filter envelope
     filter_keyboard: GainNode;          // filter keyboard tracking
     frequency: ConstantSourceNode;      // note frequency
@@ -323,7 +321,13 @@ export class Synth {
         mode: Mode.Poly
     };
 
-    constructor(audioCtx: AudioContext) {
+    private valueToFrequencyLUT: Float32Array;
+
+    /** Create Synth
+     *
+     * @param autoConnect Automatically connect to audioCtx.destination
+     */
+    constructor(audioCtx: AudioContext, autoConnect = true) {
         this.audioCtx = audioCtx;
         this.notes = new Map();
         this.tuning = 440;
@@ -344,12 +348,22 @@ export class Synth {
         this.masterVolume = -12; // dB
         this.masterGain = audioCtx.createGain();
         this.setMasterVolume(this.masterVolume);
-        this.masterGain.connect(audioCtx.destination);
+        if (autoConnect) {
+            this.masterGain.connect(audioCtx.destination);
+        }
+        const lutSize = 33;
+        this.valueToFrequencyLUT = new Float32Array(lutSize);
+        for (let i = 0; i < lutSize; ++i) {
+            this.valueToFrequencyLUT[i] = valueToFrequency(2 * i / (lutSize - 1) - 1);
+        }
     }
 
-    /** Initialize resources, must be called before playing any notes. */
-    async init(): Promise<void> {
-        return loadAudioWorkletProcessor(this.audioCtx, ExponentialProcessor);
+    connect(destination: AudioNode): void {
+        this.masterGain.connect(destination);
+    }
+
+    disconnect(): void {
+        this.masterGain.disconnect();
     }
 
     /** Apply a preset overwriting the current settings, unspecified settings are kept. */
@@ -573,15 +587,11 @@ export class Synth {
             oscillators.push({ voices, frequency: oscillator_frequency, gain: oscillator_gain });
         }
         // Node to convert exponential value 0-1 to frequency between 20 Hz and 20 kHz
-        let filter_cutoff: AudioWorkletNode;
-        try {
-            filter_cutoff = new AudioWorkletNode(this.audioCtx, "exponential-processor", { processorOptions: { coefficient: 20, base: 1000 } });
-        } catch (error) {
-            throw new Error(`Failed to create AudioWorkletNode "exponential-processor". Did you run and await init()?`);
-        }
+        let filter_cutoff = new WaveShaperNode(this.audioCtx, { curve: this.valueToFrequencyLUT });
 
         // Filter
         const filter = this.audioCtx.createBiquadFilter();
+        filter.frequency.value = 0;
         filter.type = "lowpass";
         this.filterSettings.cutoff.connect(filter_cutoff);
         this.filterSettings.resonance.connect(filter.Q);
@@ -713,24 +723,33 @@ export class Synth {
                 // Reset in case of multiple calls
                 note.oscillators[0].voices[0].oscillator.onended = null;
             }
+            let i = 0;
             for (let oscillator of note.oscillators) {
                 if (oscillator.voices.length > 0) {
                     for (let voice of oscillator.voices) {
+                        voice.oscillator.stop();
                         voice.oscillator.disconnect();
                         voice.panner.disconnect();
                     }
-                    note.gain.disconnect();
-                    note.filter.disconnect();
-                    note.filter_cutoff.disconnect();
-                    note.filter_envelope.disconnect();
-                    for (let oscillator of note.oscillators) {
-                        oscillator.frequency.disconnect();
-                        oscillator.gain.disconnect();
-                    }
-                    note.frequency.disconnect();
-                    this.notes.delete(noteNumber);
                 }
+                oscillator.frequency.disconnect();
+                oscillator.gain.disconnect();
+                this.oscillatorSettings[i].compound_gain.disconnect(oscillator.gain.gain);
+                this.oscillatorSettings[i].pitch.disconnect(oscillator.frequency.gain);
+                ++i;
             }
+            note.frequency.stop();
+            note.gain.disconnect();
+            note.filter.disconnect();
+            note.filter_cutoff.disconnect();
+            note.filter_envelope.disconnect();
+            note.filter_keyboard.disconnect();
+            note.frequency.disconnect();
+            this.filterSettings.cutoff.disconnect(note.filter_cutoff);
+            this.filterSettings.resonance.disconnect(note.filter.Q);
+            this.filterSettings.envelope.disconnect(note.filter_envelope);
+            this.filterSettings.keyboard.disconnect(note.filter_keyboard);
+            this.notes.delete(noteNumber);
         }
     }
 
