@@ -542,10 +542,10 @@ export class Synth {
         // TODO: This should instead reuse the oscillators
         const gain = this.audioCtx.createGain();
         if (this.envelopes.amplitude.attack > 0) {
-            gain.gain.setValueAtTime(0, this.audioCtx.currentTime);
+            gain.gain.value = 0;
             gain.gain.setValueCurveAtTime(calculateEnvelopeCurveArray(0, velocity, this.envelopes.amplitude.attackShape), this.audioCtx.currentTime, this.envelopes.amplitude.attack);
         } else {
-            gain.gain.setValueAtTime(velocity, this.audioCtx.currentTime);
+            gain.gain.value = velocity;
         }
         if (this.envelopes.amplitude.decay > 0) {
             gain.gain.setValueCurveAtTime(calculateEnvelopeCurveArray(velocity, velocity * this.envelopes.amplitude.sustain, this.envelopes.amplitude.decayShape), this.audioCtx.currentTime + this.envelopes.amplitude.attack, this.envelopes.amplitude.decay);
@@ -556,7 +556,7 @@ export class Synth {
         if (this.glide > 0 && this.previousNoteNumber !== undefined) {
             const previousFrequency = noteNumberToFrequency(this.previousNoteNumber, this.tuning);
             const thisFrequency = noteNumberToFrequency(noteNumber, this.tuning);
-            frequency.offset.setValueAtTime(previousFrequency, this.audioCtx.currentTime);
+            frequency.offset.value = previousFrequency;
             frequency.offset.exponentialRampToValueAtTime(thisFrequency, this.audioCtx.currentTime + this.glide);
         }
         const oscillators = [];
@@ -564,21 +564,21 @@ export class Synth {
             if (!settings.on) { continue; }
             const voices = [];
             const oscillator_gain = this.audioCtx.createGain();
-            oscillator_gain.gain.setValueAtTime(0, this.audioCtx.currentTime);
+            oscillator_gain.gain.value = 0;
             settings.compound_gain.connect(oscillator_gain.gain);
             oscillator_gain.connect(gain);
             const oscillator_frequency = this.audioCtx.createGain();
-            oscillator_frequency.gain.setValueAtTime(0, this.audioCtx.currentTime);
+            oscillator_frequency.gain.value = 0;
             settings.pitch.connect(oscillator_frequency.gain);
             frequency.connect(oscillator_frequency);
             for (let i = 0; i < settings.unison; i++) {
                 const panner = this.audioCtx.createStereoPanner();
-                panner.pan.setValueAtTime(settings.unison > 1 ? i / (settings.unison - 1) * 2 - 1 : 0, this.audioCtx.currentTime);
+                panner.pan.value = settings.unison > 1 ? i / (settings.unison - 1) * 2 - 1 : 0;
                 const oscillator = this.audioCtx.createOscillator();
                 oscillator.setPeriodicWave(createPeriodicWave(this.audioCtx, settings.waveform, Math.random(), settings.pwm));
-                oscillator.frequency.setValueAtTime(0, this.audioCtx.currentTime);
+                oscillator.frequency.value = 0;
                 oscillator_frequency.connect(oscillator.frequency);
-                oscillator.detune.setValueAtTime(calculateDetune(settings.unison, i) * settings.detune, this.audioCtx.currentTime);
+                oscillator.detune.value = calculateDetune(settings.unison, i) * settings.detune;
                 oscillator.connect(panner);
                 panner.connect(oscillator_gain);
                 oscillator.start();
@@ -599,10 +599,10 @@ export class Synth {
         // Filter envelope
         const filter_envelope = this.audioCtx.createGain();
         if (this.envelopes.filter.attack > 0) {
-            filter_envelope.gain.setValueAtTime(0, this.audioCtx.currentTime);
+            filter_envelope.gain.value = 0;
             filter_envelope.gain.setValueCurveAtTime(calculateEnvelopeCurveArray(0, 1, this.envelopes.filter.attackShape), this.audioCtx.currentTime, this.envelopes.filter.attack);
         } else {
-            filter_envelope.gain.setValueAtTime(1, this.audioCtx.currentTime);
+            filter_envelope.gain.value = 1;
         }
         if (this.envelopes.filter.decay > 0) {
             filter_envelope.gain.setValueCurveAtTime(calculateEnvelopeCurveArray(1, this.envelopes.filter.sustain, this.envelopes.filter.decayShape), this.audioCtx.currentTime + this.envelopes.filter.attack, this.envelopes.filter.decay);
@@ -614,10 +614,10 @@ export class Synth {
         // Keyboard tracking
         const filter_keyboard = this.audioCtx.createGain();
         if (this.glide > 0 && this.previousNoteNumber !== undefined) {
-            filter_keyboard.gain.setValueAtTime(noteNumberToFilterValue(this.previousNoteNumber), this.audioCtx.currentTime);
+            filter_keyboard.gain.value = noteNumberToFilterValue(this.previousNoteNumber);
             filter_keyboard.gain.linearRampToValueAtTime(noteNumberToFilterValue(noteNumber), this.audioCtx.currentTime + this.glide);
         } else {
-            filter_keyboard.gain.setValueAtTime(noteNumberToFilterValue(noteNumber), this.audioCtx.currentTime);
+            filter_keyboard.gain.value = noteNumberToFilterValue(noteNumber);
         }
         this.filterSettings.keyboard.connect(filter_keyboard);
         filter_keyboard.connect(filter_envelope);
@@ -666,7 +666,7 @@ export class Synth {
                 } catch (err) {
                     // Fallback for Firefox
                     const new_gain = this.audioCtx.createGain();
-                    new_gain.gain.setValueAtTime(currentGain, this.audioCtx.currentTime);
+                    new_gain.gain.value = currentGain;
                     new_gain.gain.setValueCurveAtTime(calculateEnvelopeCurveArray(currentGain, 0, this.envelopes.filter.releaseShape), this.audioCtx.currentTime, this.envelopes.amplitude.release);
                     new_gain.connect(note.filter);
                     for (let oscillator of note.oscillators) {
@@ -687,7 +687,7 @@ export class Synth {
                 } catch (err) {
                     // Fallback for Firefox
                     const new_envelope = this.audioCtx.createGain();
-                    new_envelope.gain.setValueAtTime(currentEnvelope, this.audioCtx.currentTime);
+                    new_envelope.gain.value = currentEnvelope;
                     new_envelope.gain.setValueCurveAtTime(calculateEnvelopeCurveArray(currentEnvelope, 0, this.envelopes.filter.releaseShape), this.audioCtx.currentTime, this.envelopes.filter.release);
                     new_envelope.connect(note.filter_cutoff);
                     this.filterSettings.envelope.connect(new_envelope);

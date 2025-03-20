@@ -32,7 +32,6 @@ import { Synth } from "@c-wiren/synth";
 
 const audioCtx = new window.AudioContext();
 let synth = new Synth(audioCtx);
-await synth.init();
 synth.noteOn(60, 1);
 window.setTimeout(() => {
   synth.noteOff(60);
