@@ -49,6 +49,7 @@ interface Note {
     filter_envelope: GainNode;          // filter envelope
     filter_keyboard: GainNode;          // filter keyboard tracking
     frequency: ConstantSourceNode;      // note frequency
+    pitch: GainNode;                    // pitch multiplier
     oscillators: Oscillator[];
     released: boolean;
 }
@@ -129,6 +130,10 @@ export interface Preset {
     glide_always: boolean;
     /** Synthesizer mode/polyphony. */
     mode: Mode;
+    /** LFO frequency in Hz. */
+    lfoFrequency: number;
+    /** LFO pitch modulation depth (0-1), up to two octaves in depth. */
+    lfoPitch: number;
 }
 
 function validatePreset(preset: DeepPartial<Preset>) {
@@ -146,6 +151,11 @@ function validatePreset(preset: DeepPartial<Preset>) {
     assert((preset.filter?.cutoff ?? 0) >= 0 && (preset.filter?.cutoff ?? 0) <= 1, "Cutoff must be between 0 and 1");
     assert((preset.filter?.resonance ?? 0) >= 0, "Resonance must be non-negative");
     assert((preset.filter?.envelope ?? 0) >= 0 && (preset.filter?.envelope ?? 0) <= 1, "Filter envelope must be between 0 and 1");
+    assert((preset.filter?.keyboard ?? 0) >= 0 && (preset.filter?.keyboard ?? 0) <= 1, "Keyboard tracking must be between 0 and 1");
+
+    assert((preset.glide ?? 0) >= 0, "Glide must be non-negative");
+    assert((preset.lfoFrequency ?? 0) >= 0, "LFO frequency must be non-negative");
+    assert((preset.lfoPitch ?? 0) >= 0 && (preset.lfoPitch ?? 0) <= 1, "LFO pitch must be between 0 and 1");
 }
 
 /** Convert decibels to a gain multiplier. */
@@ -294,6 +304,9 @@ export class Synth {
         envelope: ConstantSourceNode;  // 0-1
         keyboard: ConstantSourceNode;  // 0-1
     };
+    private lfo: OscillatorNode;
+    private lfoGain: GainNode;
+    private lfoPitch: WaveShaperNode;
     private masterVolume: number; // dB
     private masterGain: GainNode;
     private glide: number; // seconds
@@ -318,10 +331,13 @@ export class Synth {
         },
         glide: 0,
         glide_always: false,
-        mode: Mode.Poly
+        mode: Mode.Poly,
+        lfoFrequency: 5,
+        lfoPitch: 0
     };
 
     private valueToFrequencyLUT: Float32Array;
+    private octaveToMultiplierLUT: Float32Array;
 
     /** Create Synth
      *
@@ -345,6 +361,12 @@ export class Synth {
         this.glide = 0; // seconds
         this.glide_always = false;
         this.mode = Synth.defaultPreset.mode;
+        this.lfo = audioCtx.createOscillator();
+        this.lfo.frequency.value = 5;
+        this.lfoGain = audioCtx.createGain();
+        this.lfoGain.gain.value = 0;
+        this.lfo.connect(this.lfoGain);
+        this.lfo.start();
         this.masterVolume = -12; // dB
         this.masterGain = audioCtx.createGain();
         this.setMasterVolume(this.masterVolume);
@@ -356,6 +378,12 @@ export class Synth {
         for (let i = 0; i < lutSize; ++i) {
             this.valueToFrequencyLUT[i] = valueToFrequency(2 * i / (lutSize - 1) - 1);
         }
+        this.octaveToMultiplierLUT = new Float32Array(lutSize);
+        for (let i = 0; i < lutSize; ++i) {
+            this.octaveToMultiplierLUT[i] = Math.pow(2, 2 * i / (lutSize - 1) - 1);
+        }
+        this.lfoPitch = new WaveShaperNode(this.audioCtx, { curve: this.octaveToMultiplierLUT });
+        this.lfoGain.connect(this.lfoPitch);
     }
 
     connect(destination: AudioNode): void {
@@ -449,6 +477,12 @@ export class Synth {
                 }
             }
         }
+        if (preset.lfoFrequency !== undefined) {
+            this.lfo.frequency.setValueAtTime(preset.lfoFrequency, this.audioCtx.currentTime);
+        }
+        if (preset.lfoPitch !== undefined) {
+            this.lfoGain.gain.setValueAtTime(preset.lfoPitch, this.audioCtx.currentTime);
+        }
     }
 
     /** Apply a preset overwriting the current settings, unspecified settings are reset to default. */
@@ -481,7 +515,9 @@ export class Synth {
             },
             glide: this.glide,
             glide_always: this.glide_always,
-            mode: this.mode
+            mode: this.mode,
+            lfoFrequency: this.lfo.frequency.value,
+            lfoPitch: this.lfoGain.gain.value
         };
     }
 
@@ -553,6 +589,10 @@ export class Synth {
             gain.gain.setValueAtTime(velocity * this.envelopes.amplitude.sustain, this.audioCtx.currentTime + this.envelopes.amplitude.attack);
         }
         const frequency = createConstantSource(this.audioCtx, noteNumberToFrequency(noteNumber, this.tuning));
+        const pitch = this.audioCtx.createGain();
+        pitch.gain.value = 0;
+        this.lfoPitch.connect(pitch.gain);
+        frequency.connect(pitch);
         if (this.glide > 0 && this.previousNoteNumber !== undefined) {
             const previousFrequency = noteNumberToFrequency(this.previousNoteNumber, this.tuning);
             const thisFrequency = noteNumberToFrequency(noteNumber, this.tuning);
@@ -570,7 +610,7 @@ export class Synth {
             const oscillator_frequency = this.audioCtx.createGain();
             oscillator_frequency.gain.value = 0;
             settings.pitch.connect(oscillator_frequency.gain);
-            frequency.connect(oscillator_frequency);
+            pitch.connect(oscillator_frequency);
             for (let i = 0; i < settings.unison; i++) {
                 const panner = this.audioCtx.createStereoPanner();
                 panner.pan.value = settings.unison > 1 ? i / (settings.unison - 1) * 2 - 1 : 0;
@@ -635,7 +675,7 @@ export class Synth {
             }
         }
         this.previousNoteNumber = noteNumber;
-        this.notes.set(noteNumber, { noteNumber, gain, filter, filter_cutoff, filter_envelope, filter_keyboard, frequency, oscillators, released: false });
+        this.notes.set(noteNumber, { noteNumber, gain, filter, filter_cutoff, filter_envelope, filter_keyboard, frequency, pitch, oscillators, released: false });
     }
 
     /** Trigger note off.
@@ -745,10 +785,12 @@ export class Synth {
             note.filter_envelope.disconnect();
             note.filter_keyboard.disconnect();
             note.frequency.disconnect();
+            note.pitch.disconnect();
             this.filterSettings.cutoff.disconnect(note.filter_cutoff);
             this.filterSettings.resonance.disconnect(note.filter.Q);
             this.filterSettings.envelope.disconnect(note.filter_envelope);
             this.filterSettings.keyboard.disconnect(note.filter_keyboard);
+            this.lfoPitch.disconnect(note.pitch.gain);
             this.notes.delete(noteNumber);
         }
     }
