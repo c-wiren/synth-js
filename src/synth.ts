@@ -1,3 +1,5 @@
+import { Chorus } from "./chorus";
+
 function assert(condition: any, message?: string): asserts condition {
     if (!condition) {
         throw new Error(message);
@@ -117,7 +119,7 @@ export interface Preset {
     filter: {
         /** Cutoff frequency 0-1, representing 20 Hz to 20 kHz. */
         cutoff: number;
-        /** Resonance/Q amount at the cutoff frequency. */
+        /** Resonance at the cutoff frequency (0-1). */
         resonance: number;
         /** Filter envelope depth, controlling how much the envelope affects cutoff (0-1). */
         envelope: number;
@@ -134,6 +136,16 @@ export interface Preset {
     lfoFrequency: number;
     /** LFO pitch modulation depth (0-1), up to two octaves in depth. */
     lfoPitch: number;
+    /** Effects */
+    fx: {
+        /** Chorus */
+        chorus: {
+            /** Chorus amount (0-1). */
+            amount: number;
+            /** Chorus mode. */
+            mode: 0 | 1;
+        };
+    };
 }
 
 function validatePreset(preset: DeepPartial<Preset>) {
@@ -149,13 +161,17 @@ function validatePreset(preset: DeepPartial<Preset>) {
         assert((oscillator.unison ?? 1) >= 1, "Unison must be at least 1");
     }
     assert((preset.filter?.cutoff ?? 0) >= 0 && (preset.filter?.cutoff ?? 0) <= 1, "Cutoff must be between 0 and 1");
-    assert((preset.filter?.resonance ?? 0) >= 0, "Resonance must be non-negative");
     assert((preset.filter?.envelope ?? 0) >= 0 && (preset.filter?.envelope ?? 0) <= 1, "Filter envelope must be between 0 and 1");
     assert((preset.filter?.keyboard ?? 0) >= 0 && (preset.filter?.keyboard ?? 0) <= 1, "Keyboard tracking must be between 0 and 1");
 
     assert((preset.glide ?? 0) >= 0, "Glide must be non-negative");
     assert((preset.lfoFrequency ?? 0) >= 0, "LFO frequency must be non-negative");
     assert((preset.lfoPitch ?? 0) >= 0 && (preset.lfoPitch ?? 0) <= 1, "LFO pitch must be between 0 and 1");
+
+    if (preset.fx && preset.fx.chorus) {
+        assert((preset.fx.chorus.amount ?? 0) >= 0, "Chorus amount must be non-negative");
+        assert(preset.fx.chorus.mode === 0 || preset.fx.chorus.mode === 1, "Chorus mode must be 0 or 1");
+    }
 }
 
 /** Convert decibels to a gain multiplier. */
@@ -176,6 +192,14 @@ export function valueToFrequency(value: number): number {
 /** Convert a frequency between 20 Hz and 20 kHz to an exponential value (0-1). */
 export function frequencyToValue(frequency: number): number {
     return Math.log(frequency / 20) / Math.log(1000);
+}
+
+function resonanceToQ(resonance: number): number {
+    return -6 + resonance * 26;
+}
+
+function QToResonance(Q: number): number {
+    return (Q + 6) / 26;
 }
 
 function calculateDetune(unison: number, voice: number): number {
@@ -300,13 +324,14 @@ export class Synth {
     private oscillatorSettings: OscillatorSettings[];
     private filterSettings: {
         cutoff: ConstantSourceNode;    // 0-1
-        resonance: ConstantSourceNode; // Q
+        resonance: ConstantSourceNode; // 0-1
         envelope: ConstantSourceNode;  // 0-1
         keyboard: ConstantSourceNode;  // 0-1
     };
     private lfo: OscillatorNode;
     private lfoGain: GainNode;
     private lfoPitch: WaveShaperNode;
+    private summingBus: GainNode; // summing bus for all oscillators
     private masterVolume: number; // dB
     private masterGain: GainNode;
     private glide: number; // seconds
@@ -325,7 +350,7 @@ export class Synth {
         ],
         filter: {
             cutoff: 1,
-            resonance: 0.5,
+            resonance: 0,
             envelope: 0,
             keyboard: 0
         },
@@ -333,11 +358,20 @@ export class Synth {
         glide_always: false,
         mode: Mode.Poly,
         lfoFrequency: 5,
-        lfoPitch: 0
+        lfoPitch: 0,
+        fx: {
+            chorus: {
+                amount: 0,
+                mode: 0
+            }
+        }
     };
 
     private valueToFrequencyLUT: Float32Array;
     private octaveToMultiplierLUT: Float32Array;
+
+    // FX
+    private chorus: Chorus;
 
     /** Create Synth
      *
@@ -354,7 +388,7 @@ export class Synth {
         this.oscillatorSettings.push(defaultOscillatorSettings(audioCtx, false));
         this.filterSettings = {
             cutoff: createConstantSource(audioCtx, Synth.defaultPreset.filter.cutoff),
-            resonance: createConstantSource(audioCtx, Synth.defaultPreset.filter.resonance),
+            resonance: createConstantSource(audioCtx, resonanceToQ(Synth.defaultPreset.filter.resonance)),
             envelope: createConstantSource(audioCtx, Synth.defaultPreset.filter.envelope),
             keyboard: createConstantSource(audioCtx, Synth.defaultPreset.filter.keyboard)
         };
@@ -367,9 +401,15 @@ export class Synth {
         this.lfoGain.gain.value = 0;
         this.lfo.connect(this.lfoGain);
         this.lfo.start();
+        this.summingBus = audioCtx.createGain();
+        this.summingBus.gain.value = 1;
         this.masterVolume = -12; // dB
         this.masterGain = audioCtx.createGain();
         this.setMasterVolume(this.masterVolume);
+        this.chorus = new Chorus(audioCtx);
+        this.summingBus.connect(this.chorus.input);
+        this.chorus.connect(this.masterGain);
+        this.summingBus.connect(this.masterGain);
         if (autoConnect) {
             this.masterGain.connect(audioCtx.destination);
         }
@@ -452,7 +492,7 @@ export class Synth {
                 this.filterSettings.cutoff.offset.setValueAtTime(preset.filter.cutoff, this.audioCtx.currentTime);
             }
             if (preset.filter.resonance !== undefined) {
-                this.filterSettings.resonance.offset.setValueAtTime(preset.filter.resonance, this.audioCtx.currentTime);
+                this.filterSettings.resonance.offset.setValueAtTime(resonanceToQ(preset.filter.resonance), this.audioCtx.currentTime);
             }
             if (preset.filter.envelope !== undefined) {
                 this.filterSettings.envelope.offset.setValueAtTime(preset.filter.envelope, this.audioCtx.currentTime);
@@ -483,6 +523,16 @@ export class Synth {
         if (preset.lfoPitch !== undefined) {
             this.lfoGain.gain.setValueAtTime(preset.lfoPitch, this.audioCtx.currentTime);
         }
+        if (preset.fx) {
+            if (preset.fx.chorus) {
+                if (preset.fx.chorus.amount !== undefined) {
+                    this.chorus.gain.setValueAtTime(preset.fx.chorus.amount, this.audioCtx.currentTime);
+                }
+                if (preset.fx.chorus.mode !== undefined) {
+                    this.chorus.setMode(preset.fx.chorus.mode);
+                }
+            }
+        }
     }
 
     /** Apply a preset overwriting the current settings, unspecified settings are reset to default. */
@@ -509,7 +559,7 @@ export class Synth {
             })),
             filter: {
                 cutoff: this.filterSettings.cutoff.offset.value,
-                resonance: this.filterSettings.resonance.offset.value,
+                resonance: QToResonance(this.filterSettings.resonance.offset.value),
                 envelope: this.filterSettings.envelope.offset.value,
                 keyboard: this.filterSettings.keyboard.offset.value
             },
@@ -517,7 +567,13 @@ export class Synth {
             glide_always: this.glide_always,
             mode: this.mode,
             lfoFrequency: this.lfo.frequency.value,
-            lfoPitch: this.lfoGain.gain.value
+            lfoPitch: this.lfoGain.gain.value,
+            fx: {
+                chorus: {
+                    amount: this.chorus.gain.value,
+                    mode: this.chorus.getMode()
+                }
+            }
         };
     }
 
@@ -665,7 +721,7 @@ export class Synth {
         filter_envelope.connect(filter_cutoff);
         filter_cutoff.connect(filter.frequency);
         gain.connect(filter);
-        filter.connect(this.masterGain);
+        filter.connect(this.summingBus);
 
         if (this.mode == Mode.Poly) {
             this.noteAbort(noteNumber);
