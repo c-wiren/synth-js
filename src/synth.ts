@@ -145,7 +145,11 @@ export interface Preset {
             /** Chorus mode. */
             mode: 0 | 1;
         };
+        /** Soft clipping on the master output. */
+        softClip: boolean;
     };
+    /** Master volume in dB. */
+    masterVolume: number;
 }
 
 function validatePreset(preset: DeepPartial<Preset>) {
@@ -308,6 +312,15 @@ function noteNumberToFilterValue(noteNumber: number): number {
     return ((noteNumber - middleC) / 12) * Math.log(2) / Math.log(1000);
 }
 
+function softClipCurve(x: number): number {
+    if (Math.abs(x) < 0.5) {
+        return x;
+    } else {
+        const k = 0.94048;
+        return Math.sign(x) * (0.5 + (1 - Math.exp(2 * k * (0.5 - Math.abs(x)))) / (2 * k));
+    }
+}
+
 /** Polyphonic synthesizer with analog-like features based on native Web Audio API nodes. */
 export class Synth {
     private audioCtx: AudioContext;
@@ -337,6 +350,10 @@ export class Synth {
     private glide: number; // seconds
     private glide_always: boolean;
     private mode: Mode;
+    private softClipEnabled: boolean;
+    private softClipGain: GainNode;
+    private softClip: WaveShaperNode;
+    private masterOutput: GainNode;
 
     /** Default preset. Is used as a fallback for applyPreset(). */
     static readonly defaultPreset: Preset = {
@@ -363,8 +380,10 @@ export class Synth {
             chorus: {
                 amount: 0,
                 mode: 0
-            }
-        }
+            },
+            softClip: true
+        },
+        masterVolume: -12
     };
 
     private valueToFrequencyLUT: Float32Array;
@@ -405,13 +424,26 @@ export class Synth {
         this.summingBus.gain.value = 1;
         this.masterVolume = -12; // dB
         this.masterGain = audioCtx.createGain();
-        this.setMasterVolume(this.masterVolume);
+        this.masterGain.gain.value = dBToGain(this.masterVolume);
         this.chorus = new Chorus(audioCtx);
         this.summingBus.connect(this.chorus.input);
         this.chorus.connect(this.masterGain);
         this.summingBus.connect(this.masterGain);
+        this.softClipEnabled = true;
+        this.masterOutput = audioCtx.createGain();
+        this.masterOutput.gain.value = 1;
+        this.softClipGain = audioCtx.createGain();
+        this.softClipGain.gain.value = 0.5;
+        const softClipLUT = new Float32Array(17);
+        for (let i = 0; i < softClipLUT.length; ++i) {
+            softClipLUT[i] = softClipCurve((2 * i / (softClipLUT.length - 1) - 1) * 2);
+        }
+        this.softClip = new WaveShaperNode(audioCtx, { curve: softClipLUT, oversample: "4x" });
+        this.masterGain.connect(this.softClipGain);
+        this.softClipGain.connect(this.softClip);
+        this.softClip.connect(this.masterOutput);
         if (autoConnect) {
-            this.masterGain.connect(audioCtx.destination);
+            this.masterOutput.connect(audioCtx.destination);
         }
         const lutSize = 33;
         this.valueToFrequencyLUT = new Float32Array(lutSize);
@@ -427,11 +459,11 @@ export class Synth {
     }
 
     connect(destination: AudioNode): void {
-        this.masterGain.connect(destination);
+        this.masterOutput.connect(destination);
     }
 
     disconnect(): void {
-        this.masterGain.disconnect();
+        this.masterOutput.disconnect();
     }
 
     /** Apply a preset overwriting the current settings, unspecified settings are kept. */
@@ -531,7 +563,21 @@ export class Synth {
                 if (preset.fx.chorus.mode !== undefined) {
                     this.chorus.setMode(preset.fx.chorus.mode);
                 }
+                if (preset.fx.softClip !== undefined && preset.fx.softClip !== this.softClipEnabled) {
+                    this.softClipEnabled = preset.fx.softClip;
+                    if (this.softClipEnabled) {
+                        this.masterGain.disconnect();
+                        this.masterGain.connect(this.softClipGain);
+                    } else {
+                        this.masterGain.disconnect();
+                        this.masterGain.connect(this.masterOutput);
+                    }
+                }
             }
+        }
+        if (preset.masterVolume !== undefined) {
+            this.masterVolume = preset.masterVolume;
+            this.masterGain.gain.setValueAtTime(dBToGain(this.masterVolume), this.audioCtx.currentTime);
         }
     }
 
@@ -572,8 +618,10 @@ export class Synth {
                 chorus: {
                     amount: this.chorus.gain.value,
                     mode: this.chorus.getMode()
-                }
-            }
+                },
+                softClip: this.softClipEnabled
+            },
+            masterVolume: this.masterVolume
         };
     }
 
@@ -857,16 +905,5 @@ export class Synth {
         for (let note of this.notes.values()) {
             this.noteAbort(note.noteNumber);
         }
-    }
-
-    /** Get main output level in decibels. */
-    getMasterVolume(): number {
-        return this.masterVolume;
-    }
-
-    /** Set main output level in decibels. */
-    setMasterVolume(volume: number) {
-        this.masterVolume = volume;
-        this.masterGain.gain.setValueAtTime(dBToGain(this.masterVolume), this.audioCtx.currentTime);
     }
 }
